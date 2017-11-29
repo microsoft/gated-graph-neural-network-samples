@@ -11,10 +11,10 @@ Options:
     --out_dir NAME           Lot out dir name
     --data_dir NAME          data dir name
 '''
-from typing import List
+from typing import List, Tuple, Dict, Optional
 
 from docopt import docopt
-from collections import defaultdict
+from collections import namedtuple, defaultdict
 import numpy as np
 import tensorflow as tf
 import time
@@ -30,8 +30,10 @@ import pdb
 ########################################################################################
 # Download data
 ########################################################################################
+PreprocessedGraph = namedtuple('DataPoint', ['adjacency_lists', 'num_incoming_edge_per_type', 'init', 'label'])
 
-def load_data(file_name, data_dir, task_id, restrict=-1, tie_fwd_bkwd=True):
+
+def load_data(file_name, data_dir, task_id, restrict=-1, tie_fwd_bkwd=True) -> Tuple[List[PreprocessedGraph], int]:
     full_path = os.path.join(data_dir, file_name)
 
     print("loading data from: ", full_path)
@@ -45,30 +47,35 @@ def load_data(file_name, data_dir, task_id, restrict=-1, tie_fwd_bkwd=True):
 
     processed_graphs = []
     for d in data:
-        processed_graphs.append({
-            'adjacency_lists': graph_to_adjacency_lists(d['graph'], tie_fwd_bkwd),
-            'init': d["node_features"],
-            'label': d["targets"][task_id][0]
-        })
+        (adjacency_lists, num_incoming_edge_per_type) = graph_to_adjacency_lists(d['graph'], len(d["node_features"]), tie_fwd_bkwd)
+        processed_graphs.append(PreprocessedGraph(adjacency_lists=adjacency_lists,
+                                                  num_incoming_edge_per_type=num_incoming_edge_per_type,
+                                                  init=d["node_features"],
+                                                  label=d["targets"][task_id][0]))
 
     return processed_graphs, x_dim
+
 
 ########################################################################################
 # Preprocess data
 ########################################################################################
-
 def graph_string_to_array(graph_string):
     graph = []
     for s in graph_string.split('\n'):
         graph.append([int(v) for v in s.split(' ')])
     return graph
 
-def graph_to_adjacency_lists(graph, tie_fwd_bkwd=True):
+
+def graph_to_adjacency_lists(graph, num_nodes: int, tie_fwd_bkwd=True) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
     adj_lists = defaultdict(list)
+    num_incoming_edges_dicts_per_type = defaultdict(lambda: defaultdict(lambda: 0))
     for src, e, dest in graph:
-        adj_lists[e - 1].append((src, dest))  # Make edges start from 0
+        fwd_edge_type = e - 1  # Make edges start from 0
+        adj_lists[fwd_edge_type].append((src, dest))
+        num_incoming_edges_dicts_per_type[fwd_edge_type][dest] += 1
         if tie_fwd_bkwd:
-            adj_lists[e - 1].append((dest, src))  # Make edges start from 0
+            adj_lists[fwd_edge_type].append((dest, src))
+            num_incoming_edges_dicts_per_type[fwd_edge_type][src] += 1
 
     final_adj_lists = {e: np.array(sorted(lm), dtype=np.int32)
                        for e, lm in adj_lists.items()}
@@ -79,14 +86,15 @@ def graph_to_adjacency_lists(graph, tie_fwd_bkwd=True):
         for (edge_type, edges) in adj_lists.items():
             bwd_edge_type = num_edge_types + edge_type
             final_adj_lists[bwd_edge_type] = np.array(sorted((y, x) for (x, y) in edges), dtype=np.int32)
+            for (x, y) in edges:
+                num_incoming_edges_dicts_per_type[bwd_edge_type][y] += 1
 
-    return final_adj_lists
+    return final_adj_lists, num_incoming_edges_dicts_per_type
 
 
 ########################################################################################
 # GNN model
 ########################################################################################
-
 class SparseGGNN:
     def __init__(self, params):
         self.params = params
@@ -109,16 +117,15 @@ class SparseGGNN:
     def sparse_gnn_layer(self,
                          node_embeddings: tf.Tensor,
                          adjacency_lists: List[tf.Tensor],
-                         num_incoming_edges: tf.Tensor) -> tf.Tensor:
+                         num_incoming_edges_per_type: Optional[tf.Tensor]=None) -> tf.Tensor:
         """
         Run through a GNN and return the representations of the nodes.
         :param node_embeddings: the initial embeddings of the nodes.
         :param adjacency_lists: a list of *sorted* adjacency indexes per edge type
-        :param num_incoming_edges: [v, num_edge_types] tensor indicating number of incoming edges per type
+        :param num_incoming_edges_per_type: [v, num_edge_types] tensor indicating number of incoming edges per type
+                                            Required if use_edge_bias or use_edge_msg_avg_aggregation is true.
         :return: the representations of the nodes
         """
-        h_dim = self.params['hidden_size']  # embedding_size (D)
-
         with tf.variable_scope('gnn_scope'):
             cur_node_states = node_embeddings  # number of nodes in batch v x D
             num_nodes = tf.shape(node_embeddings, out_type=tf.int64)[0]
@@ -143,8 +150,13 @@ class SparseGGNN:
                 # Pass incoming messages through linear layer:
                 incoming_messages = tf.concat(incoming_messages, axis=1)  # v x [2 *] edge_types
                 messages_passed = tf.matmul(incoming_messages, self.edge_weights)  # v x D
+
                 if self.params['use_edge_bias']:
-                    messages_passed += tf.matmul(num_incoming_edges, self.edge_biases)  # v x D
+                    messages_passed += tf.matmul(num_incoming_edges_per_type, self.edge_biases)  # v x D
+
+                if self.params['use_edge_msg_avg_aggregation']:
+                    num_incoming_edges = tf.reduce_sum(num_incoming_edges_per_type, keep_dims=True, axis=-1)  # v x 1
+                    messages_passed /= num_incoming_edges + SMALL_NUMBER
 
                 # pass updated vertex features into GRU
                 cur_node_states = self.gru_node(messages_passed, cur_node_states)[0]  # v x D
@@ -165,7 +177,8 @@ class ChemGNN:
         num_edge_types = params['n_edge_types']
         self.__adjacency_lists = [tf.placeholder(tf.int64, [None, 2], name='adjacency_e%s' % e)
                                   for e in range(num_edge_types)]
-        self.__num_incoming_edges = tf.placeholder(tf.float32, [None, num_edge_types], name='num_incoming_edges')
+        self.__num_incoming_edges_per_type = tf.placeholder(tf.float32, [None, num_edge_types],
+                                                            name='num_incoming_edges_per_type')
 
         self.__graph_nodes_list = tf.placeholder(tf.int64, [None, 2], name='graph_nodes_list')
 
@@ -206,8 +219,8 @@ class ChemGNN:
         return self.__adjacency_lists
 
     @property
-    def num_incoming_edges(self):
-        return self.__num_incoming_edges
+    def num_incoming_edges_per_type(self):
+        return self.__num_incoming_edges_per_type
 
     @property
     def graph_nodes_list(self):
@@ -237,7 +250,7 @@ class ChemGNN:
     def get_loss(self):
         node_representations = self.__gnn.sparse_gnn_layer(self.__node_features,
                                                            self.__adjacency_lists,
-                                                           self.__num_incoming_edges)
+                                                           self.__num_incoming_edges_per_type)
         computed_representations = self.gated_regression(node_representations)
         diff = computed_representations - self.__target_values
         loss = tf.reduce_mean(0.5 * (diff) ** 2)
@@ -287,6 +300,7 @@ def default_params():
         'optimizer': 'adam', # adam or fixed
         'hidden_size': 100,
         'use_edge_bias': True,
+        'use_edge_msg_avg_aggregation': False,
         'unrolling_steps': 4,
         'out': 'log.json',
         'task_id': 0,
@@ -308,23 +322,23 @@ def make_params(args):
     print(params)
     return params
 
+TaskData = namedtuple('TaskData', ['train', 'valid'])
+
 def get_data(args, params):
     data_dir = ''
     if '--data_dir' in args and args['--data_dir'] is not None:
         data_dir = args['--data_dir']
 
-    data = {}
-    data['train'], x_dim = load_data("molecules_train.json", data_dir, params['task_id'], restrict=params["restrict_data"], tie_fwd_bkwd=params['tie_fwd_bkwd'])
-    data['valid'], x_dim = load_data("molecules_valid.json", data_dir, params['task_id'], restrict=params["restrict_data"], tie_fwd_bkwd=params['tie_fwd_bkwd'])
+    train_data, x_dim = load_data("molecules_train.json", data_dir, params['task_id'], restrict=params["restrict_data"], tie_fwd_bkwd=params['tie_fwd_bkwd'])
+    valid_data, x_dim = load_data("molecules_valid.json", data_dir, params['task_id'], restrict=params["restrict_data"], tie_fwd_bkwd=params['tie_fwd_bkwd'])
 
-    n_edge_types = max(len(d['adjacency_lists']) for d in data['train'])
-
+    n_edge_types = max(len(d.adjacency_lists) for d in train_data)
     params.update({
         'n_edge_types': n_edge_types,
         'annotation_size': x_dim,
         'data_dir': data_dir
         })
-    return data
+    return TaskData(train_data, valid_data)
 
 def update_output_path(args, params):
     out_dir = args.get('--out_dir') or ''
@@ -356,7 +370,7 @@ class ThreadedIterator:
         self.__thread.join()
 
 
-def training_loop(sess, model: ChemGNN, data, params, is_training):
+def training_loop(sess, model: ChemGNN, data: List[PreprocessedGraph], params, is_training):
     chemical_accuracy = [0.066513725,0.012235489,0.071939046,0.033730778,0.033486113,0.004278493,0.001330901,0.004165489,0.004128926,0.00409976,0.004527465,0.012292586,0.037467458]
 
     def minibatch_iterator():
@@ -371,44 +385,46 @@ def training_loop(sess, model: ChemGNN, data, params, is_training):
             batch_node_features = []
             batch_graph_target_values = []
             batch_adjacency_lists = [[] for _ in range(params['n_edge_types'])]
-            batch_num_incoming_edges_dicts = [defaultdict(lambda: 0) for _ in range(params['n_edge_types'])]
+            batch_num_incoming_edges_per_type = []
             batch_graph_nodes_list = []
             node_offset = 0
 
-            while num_graphs < len(data) and node_offset + len(data[num_graphs]['init']) < params['batch_size']:
-                num_nodes_in_graph = len(data[num_graphs]['init'])
-                padded_features = np.pad(data[num_graphs]['init'],
+            while num_graphs < len(data) and node_offset + len(data[num_graphs].init) < params['batch_size']:
+                num_nodes_in_graph = len(data[num_graphs].init)
+                padded_features = np.pad(data[num_graphs].init,
                                          ((0, 0), (0, params['hidden_size'] - params['annotation_size'])),
                                          'constant')
                 batch_node_features.extend(padded_features)
                 batch_graph_nodes_list.extend((num_graphs_in_batch, node_offset + i) for i in range(num_nodes_in_graph))
                 for i in range(params['n_edge_types']):
-                    if i in data[num_graphs]['adjacency_lists']:
-                        batch_adjacency_lists[i].append(data[num_graphs]['adjacency_lists'][i] + node_offset)
+                    if i in data[num_graphs].adjacency_lists:
+                        batch_adjacency_lists[i].append(data[num_graphs].adjacency_lists[i] + node_offset)
 
-                        for edge_idx in range(data[num_graphs]['adjacency_lists'][i].shape[0]):
-                            batch_num_incoming_edges_dicts[i][data[num_graphs]['adjacency_lists'][i][edge_idx,1] + node_offset] += 1
-                batch_graph_target_values.append(data[num_graphs]['label'])
+                # Turn counters for incoming edges into np array:
+                num_incoming_edges_per_type = np.zeros((num_nodes_in_graph, params['n_edge_types']))
+                for (e_type, num_incoming_edges_per_type_dict) in data[num_graphs].num_incoming_edge_per_type.items():
+                    for (node_id, edge_count) in num_incoming_edges_per_type_dict.items():
+                        num_incoming_edges_per_type[node_id, e_type] = edge_count
+                batch_num_incoming_edges_per_type.append(num_incoming_edges_per_type)
+
+                batch_graph_target_values.append(data[num_graphs].label)
                 num_graphs += 1
                 num_graphs_in_batch += 1
                 node_offset += num_nodes_in_graph
 
             # Merge adjacency lists and information about incoming nodes:
-            batch_num_incoming_edges = np.zeros([node_offset, params['n_edge_types']])
             for i in range(params['n_edge_types']):
                 if len(batch_adjacency_lists[i]) > 0:
                     batch_adjacency_lists[i] = np.concatenate(batch_adjacency_lists[i])
                 else:
                     batch_adjacency_lists[i] = np.zeros((0, 2), dtype=np.int32)
-
-                for (v, n) in batch_num_incoming_edges_dicts[i].items():
-                    batch_num_incoming_edges[v, i] = n
+            batch_num_incoming_edges_per_type = np.concatenate(batch_num_incoming_edges_per_type, axis=0)
 
             batch_data = dict(num_graphs=num_graphs_in_batch,
                               node_features=np.array(batch_node_features),
                               target_values=np.array(batch_graph_target_values),
                               graph_nodes_list=np.array(batch_graph_nodes_list, dtype=np.int32),
-                              num_incoming_edges=batch_num_incoming_edges,
+                              num_incoming_edges_per_type=batch_num_incoming_edges_per_type,
                               adjacency_lists=batch_adjacency_lists)
 
             yield batch_data
@@ -423,7 +439,7 @@ def training_loop(sess, model: ChemGNN, data, params, is_training):
             model.num_graphs: batch_data['num_graphs'],
             model.node_features: batch_data['node_features'],
             model.target_values: batch_data['target_values'],
-            model.num_incoming_edges: batch_data['num_incoming_edges'],
+            model.num_incoming_edges_per_type: batch_data['num_incoming_edges_per_type'],
             model.graph_nodes_list: batch_data['graph_nodes_list']
         }
         for i in range(params['n_edge_types']):
@@ -479,11 +495,11 @@ def main():
 
         print('epoch', epoch, 'train ')
         train_instances_per_s, train_loss, train_acc = training_loop(
-            sess, model, data['train'], params, True)
+            sess, model, data.train, params, True)
         if params['do_validation']:
             print('epoch', epoch, 'valid ',)
             val_instances_per_s, val_loss, val_acc = training_loop(
-                sess, model, data['valid'], params, False)
+                sess, model, data.valid, params, False)
         else:
             val_instances_per_s = val_loss = -1
 
