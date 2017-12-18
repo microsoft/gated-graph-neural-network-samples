@@ -27,6 +27,9 @@ import sys, traceback
 import pdb
 
 
+SMALL_NUMBER = 1e-7
+
+
 ########################################################################################
 # Download data
 ########################################################################################
@@ -100,15 +103,49 @@ class SparseGGNN:
         self.params = params
         self.num_edge_types = self.params['n_edge_types']
         h_dim = self.params['hidden_size']
-        self.edge_weights = tf.Variable(self.init_weights([self.num_edge_types * h_dim, h_dim]),
-                                        name='graph_edge_weights')
+
+        # Generate per-layer values for edge weights, biases and gated units. If we tie them, they are just copies:
+        self.edge_weights = []
+        for step in range(self.params['unrolling_steps']):
+            with tf.variable_scope('gnn_layer_%i' % step):
+                if len(self.edge_weights) == 0 or not(self.params['tie_gnn_layers']):
+                    self.edge_weights.append(tf.Variable(self.init_weights([self.num_edge_types * h_dim, h_dim]),
+                                                         name='gnn_edge_weights_%i' % step))
+                else:
+                    self.edge_weights.append(self.edge_weights[-1])
 
         if self.params['use_edge_bias']:
-            self.edge_biases = tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
-                                           name='graph_edge_biases')
+            self.edge_biases = []
+            for step in range(self.params['unrolling_steps']):
+                with tf.variable_scope('gnn_layer_%i' % step):
+                    if len(self.edge_biases) == 0 or not(self.params['tie_gnn_layers']):
+                        self.edge_biases.append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
+                                                            name='gnn_edge_biases_%i' % step))
 
-        with tf.variable_scope("graph_gru"):
-            self.gru_node = tf.nn.rnn_cell.GRUCell(h_dim)
+        activation_name = self.params['graph_rnn_activation'].lower()
+        if activation_name == 'tanh':
+            activation_fun = tf.nn.tanh
+        elif activation_name == 'relu':
+            activation_fun = tf.nn.relu
+        else:
+            raise Exception("Unknown activation function type '%s'." % activation_name)
+
+        self.rnn_cells = []
+        for step in range(self.params['unrolling_steps']):
+            with tf.variable_scope('gnn_layer_%i' % step):
+                if len(self.rnn_cells) == 0 or not(self.params['tie_gnn_layers']):
+                    cell_type = self.params['graph_rnn_cell'].lower()
+
+                    if cell_type == 'gru':
+                        cell = tf.nn.rnn_cell.GRUCell(h_dim, activation=activation_fun)
+                    elif cell_type == 'rnn':
+                        cell = tf.nn.rnn_cell.BasicRNNCell(h_dim, activation=activation_fun)
+                    else:
+                        raise Exception("Unknown RNN cell type '%s'." % cell_type)
+                    self.rnn_cells.append(cell)
+                else:
+                    self.rnn_cells.append(self.rnn_cells[-1])
+
 
     @staticmethod
     def init_weights(shape):
@@ -139,27 +176,29 @@ class SparseGGNN:
                                                                  dense_shape=[num_nodes, num_nodes])
                 adjacency_matrices.append(adjacency_matrix_for_edge_type)
 
-            for _ in range(self.params['unrolling_steps']):
-                incoming_messages = []  # list of v x D
+            for step in range(self.params['unrolling_steps']):
+                effective_step = 0 if self.params['tie_gnn_layers'] else step
+                with tf.variable_scope('gnn_layer_%i' % effective_step):
+                    incoming_messages = []  # list of v x D
 
-                # Collect incoming messages per edge type
-                for adjacency_matrix in adjacency_matrices:
-                    incoming_messages_per_type = tf.sparse_tensor_dense_matmul(adjacency_matrix, cur_node_states)  # v x D
-                    incoming_messages.extend([incoming_messages_per_type])
+                    # Collect incoming messages per edge type
+                    for adjacency_matrix in adjacency_matrices:
+                        incoming_messages_per_type = tf.sparse_tensor_dense_matmul(adjacency_matrix, cur_node_states)  # v x D
+                        incoming_messages.extend([incoming_messages_per_type])
 
-                # Pass incoming messages through linear layer:
-                incoming_messages = tf.concat(incoming_messages, axis=1)  # v x [2 *] edge_types
-                messages_passed = tf.matmul(incoming_messages, self.edge_weights)  # v x D
+                    # Pass incoming messages through linear layer:
+                    incoming_messages = tf.concat(incoming_messages, axis=1)  # v x [2 *] edge_types
+                    messages_passed = tf.matmul(incoming_messages, self.edge_weights[effective_step])  # v x D
 
-                if self.params['use_edge_bias']:
-                    messages_passed += tf.matmul(num_incoming_edges_per_type, self.edge_biases)  # v x D
+                    if self.params['use_edge_bias']:
+                        messages_passed += tf.matmul(num_incoming_edges_per_type, self.edge_biases[effective_step])  # v x D
 
-                if self.params['use_edge_msg_avg_aggregation']:
-                    num_incoming_edges = tf.reduce_sum(num_incoming_edges_per_type, keep_dims=True, axis=-1)  # v x 1
-                    messages_passed /= num_incoming_edges + SMALL_NUMBER
+                    if self.params['use_edge_msg_avg_aggregation']:
+                        num_incoming_edges = tf.reduce_sum(num_incoming_edges_per_type, keep_dims=True, axis=-1)  # v x 1
+                        messages_passed /= num_incoming_edges + SMALL_NUMBER
 
-                # pass updated vertex features into GRU
-                cur_node_states = self.gru_node(messages_passed, cur_node_states)[0]  # v x D
+                    # pass updated vertex features into RNN cell
+                    cur_node_states = self.rnn_cells[effective_step](messages_passed, cur_node_states)[0]  # v x D
 
             return cur_node_states
 
@@ -301,6 +340,9 @@ def default_params():
         'hidden_size': 100,
         'use_edge_bias': True,
         'use_edge_msg_avg_aggregation': False,
+        'tie_gnn_layers': True,
+        'graph_rnn_cell': 'GRU',  # GRU or RNN
+        'graph_rnn_activation': 'tanh',  # tanh, ReLU
         'unrolling_steps': 4,
         'out': 'log.json',
         'task_id': 0,
