@@ -1,16 +1,16 @@
 #!/usr/bin/env/python
 
-from typing import List, Tuple, Dict, Any, Sequence
+from typing import Tuple, List, Any, Sequence
 
 import tensorflow as tf
 import time
 import os
 import json
 import numpy as np
+import pickle
 
 from utils import MLP, ThreadedIterator
 
-from utils import MLP, ThreadedIterator, SMALL_NUMBER
 
 class ChemModel(object):
     @classmethod
@@ -41,6 +41,7 @@ class ChemModel(object):
         self.run_id = "_".join([time.strftime("%Y-%m-%d-%H-%M-%S"), str(os.getpid())])
         log_dir = args.get('--log_dir') or '.'
         self.log_file = os.path.join(log_dir, "%s_log.json" % self.run_id)
+        self.best_model_file = os.path.join(log_dir, "%s_model_best.pickle" % self.run_id)
 
         # Collect parameters:
         params = self.default_params()
@@ -64,10 +65,19 @@ class ChemModel(object):
         self.valid_data = self.load_data("molecules_valid.json")
 
         # Build the actual model
+        self.sess = tf.Session()
         self.placeholders = {}
         self.weights = {}
         self.ops = {}
         self.make_model()
+        self.make_train_step()
+
+        # Restore/initialize variables:
+        restore_file = args.get('--restore')
+        if restore_file is not None:
+            self.restore_model(restore_file)
+        else:
+            self.initialize_model()
 
     def load_data(self, file_name):
         full_path = os.path.join(self.data_dir, file_name)
@@ -103,12 +113,13 @@ class ChemModel(object):
                                                             name='target_values')
         self.placeholders['num_graphs'] = tf.placeholder(tf.int64, [], name='num_graphs')
         self.placeholders['dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='dropout_keep_prob')
-        self.prepare_specific_model()
 
-        # This does the actual graph work:
-        self.ops['final_node_representations'] = self.compute_final_node_representations()
+        with tf.variable_scope("graph_model"):
+            self.prepare_specific_graph_model()
+            # This does the actual graph work:
+            self.ops['final_node_representations'] = self.compute_final_node_representations()
 
-        self.ops['loss'] = 0
+        self.ops['losses'] = []
         for (internal_id, task_id) in enumerate(self.params['task_ids']):
             with tf.variable_scope("out_layer_task%i" % task_id):
                 self.weights['regression_gate_task%i' % task_id] = MLP(2 * self.params['hidden_size'], 1, [],
@@ -120,10 +131,22 @@ class ChemModel(object):
                                                         self.weights['regression_transform_task%i' % task_id])
                 diff = computed_values - self.placeholders['target_values'][internal_id,:]
                 self.ops['accuracy_task%i' % task_id] = tf.reduce_mean(tf.abs(diff))
-                self.ops['loss'] += tf.reduce_mean(0.5 * diff ** 2)
+                self.ops['losses'].append(tf.reduce_mean(0.5 * diff ** 2))
+        self.ops['loss'] = tf.reduce_sum(self.ops['losses'])
 
+    def make_train_step(self):
+        trainable_vars = self.sess.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+        if self.args.get('--freeze-graph-model'):
+            graph_vars = set(self.sess.graph.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope="graph_model"))
+            filtered_vars = []
+            for var in trainable_vars:
+                if var not in graph_vars:
+                    filtered_vars.append(var)
+                else:
+                    print("Freezing weights of variable %s." % var.name)
+            trainable_vars = filtered_vars
         optimizer = tf.train.AdamOptimizer()
-        grads_and_vars = optimizer.compute_gradients(self.ops['loss'])
+        grads_and_vars = optimizer.compute_gradients(self.ops['loss'], var_list=trainable_vars)
         clipped_grads = []
         for grad, var in grads_and_vars:
             if grad is not None:
@@ -131,12 +154,14 @@ class ChemModel(object):
             else:
                 clipped_grads.append((grad, var))
         self.ops['train_step'] = optimizer.apply_gradients(clipped_grads)
+        # Initialize newly-introduced variables:
+        self.sess.run(tf.local_variables_initializer())
 
     def gated_regression(self, last_h, regression_gate, regression_transform):
         raise Exception("Models have to implement gated_regression!")
 
-    def prepare_specific_model(self) -> None:
-        raise Exception("Models have to implement prepare_specific_model!")
+    def prepare_specific_graph_model(self) -> None:
+        raise Exception("Models have to implement prepare_specific_graph_model!")
 
     def compute_final_node_representations(self) -> tf.Tensor:
         raise Exception("Models have to implement compute_final_node_representations!")
@@ -144,7 +169,7 @@ class ChemModel(object):
     def make_minibatch_iterator(self, data: Any, is_training: bool):
         raise Exception("Models have to implement make_minibatch_iterator!")
 
-    def run_epoch(self, sess: tf.Session, epoch_name: str, data, is_training: bool):
+    def run_epoch(self, epoch_name: str, data, is_training: bool):
         chemical_accuracies = np.array([0.066513725, 0.012235489, 0.071939046, 0.033730778, 0.033486113, 0.004278493,
                                         0.001330901, 0.004165489, 0.004128926, 0.00409976, 0.004527465, 0.012292586,
                                         0.037467458])
@@ -164,7 +189,7 @@ class ChemModel(object):
             else:
                 batch_data[self.placeholders['dropout_keep_prob']] = 1.0
                 fetch_list = [self.ops['loss'], accuracy_ops]
-            result = sess.run(fetch_list, feed_dict=batch_data)
+            result = self.sess.run(fetch_list, feed_dict=batch_data)
             (batch_loss, batch_accuracies) = (result[0], result[1])
             loss += batch_loss * num_graphs
             accuracies.append(np.array(batch_accuracies) * num_graphs)
@@ -182,17 +207,18 @@ class ChemModel(object):
         return loss, accuracies, error_ratios, instance_per_sec
 
     def train(self):
-        sess = tf.Session()
-        init_op = tf.group(tf.global_variables_initializer(),
-                           tf.local_variables_initializer())
-        sess.run(init_op)
-
         log_to_save = []
         total_time_start = time.time()
-        (best_val_acc, best_val_acc_epoch) = (float("+inf"), 0)
-        for epoch in range(1, self.params['num_epochs']):
+        if self.args.get('--restore') is not None:
+            _, valid_accs, _, _ = self.run_epoch("Resumed (validation)", self.valid_data, False)
+            best_val_acc = np.sum(valid_accs)
+            best_val_acc_epoch = 0
+            print("\r\x1b[KResumed operation, initial cum. val. acc: %.5f" % best_val_acc)
+        else:
+            (best_val_acc, best_val_acc_epoch) = (float("+inf"), 0)
+        for epoch in range(1, self.params['num_epochs'] + 1):
             print("== Epoch %i" % epoch)
-            train_loss, train_accs, train_errs, train_speed = self.run_epoch(sess, "epoch %i (training)" % epoch,
+            train_loss, train_accs, train_errs, train_speed = self.run_epoch("epoch %i (training)" % epoch,
                                                                              self.train_data, True)
             accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], train_accs)])
             errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], train_errs)])
@@ -200,7 +226,7 @@ class ChemModel(object):
                                                                                                     accs_str,
                                                                                                     errs_str,
                                                                                                     train_speed))
-            valid_loss, valid_accs, valid_errs, valid_speed = self.run_epoch(sess, "epoch %i (validation)" % epoch,
+            valid_loss, valid_accs, valid_errs, valid_speed = self.run_epoch("epoch %i (validation)" % epoch,
                                                                              self.valid_data, False)
             accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], valid_accs)])
             errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], valid_errs)])
@@ -222,9 +248,53 @@ class ChemModel(object):
 
             val_acc = np.sum(valid_accs)  # type: float
             if val_acc < best_val_acc:
-                print("  (Best epoch so far, val. acc decreased to %.5f from %.5f)" % (val_acc, best_val_acc))
+                self.save_model(self.best_model_file)
+                print("  (Best epoch so far, cum. val. acc decreased to %.5f from %.5f. Saving to '%s')" % (val_acc, best_val_acc, self.best_model_file))
                 best_val_acc = val_acc
                 best_val_acc_epoch = epoch
             elif epoch - best_val_acc_epoch >= self.params['patience']:
                 print("Stopping training after %i epochs without improvement on validation accuracy." % self.params['patience'])
                 break
+
+    def save_model(self, path: str) -> None:
+        weights_to_save = {}
+        for variable in self.sess.graph.get_collection(tf.GraphKeys.GLOBAL_VARIABLES):
+            assert variable.name not in weights_to_save
+            weights_to_save[variable.name] = self.sess.run(variable)
+
+        data_to_save = {
+                         "params": self.params,
+                         "weights": weights_to_save
+                       }
+
+        with open(path, 'wb') as out_file:
+            pickle.dump(data_to_save, out_file, pickle.HIGHEST_PROTOCOL)
+
+    def initialize_model(self) -> None:
+        init_op = tf.group(tf.global_variables_initializer(),
+                           tf.local_variables_initializer())
+        self.sess.run(init_op)
+
+    def restore_model(self, path: str) -> None:
+        print("Restoring weights from file %s." % path)
+        with open(path, 'rb') as in_file:
+            data_to_load = pickle.load(in_file)
+
+        # Assert that we got the same model configuration
+        assert len(self.params) == len(data_to_load['params'])
+        for (par, par_value) in self.params.items():
+            # Fine to have different task_ids:
+            if par not in ['task_ids']:
+                assert par_value == data_to_load['params'][par]
+
+        variables_to_initialize = []
+        with tf.name_scope("restore"):
+            restore_ops = []
+            for variable in self.sess.graph.get_collection(tf.GraphKeys.GLOBAL_VARIABLES):
+                if variable.name in data_to_load['weights']:
+                    restore_ops.append(variable.assign(data_to_load['weights'][variable.name]))
+                else:
+                    print('Freshly initializing %s since no saved value was found.' % variable.name)
+                    variables_to_initialize.append(variable)
+            restore_ops.append(tf.variables_initializer(variables_to_initialize))
+            self.sess.run(restore_ops)

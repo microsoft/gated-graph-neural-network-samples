@@ -9,6 +9,8 @@ Options:
     --config CONFIG          Hyperparameter configuration dictionary (in JSON format)
     --log_dir NAME           log dir name
     --data_dir NAME          data dir name
+    --restore FILE           File to restore weights from.
+    --freeze-graph-model     Freeze weights of graph model components.
 """
 
 from typing import Sequence, Any
@@ -43,7 +45,7 @@ class DenseGGNNChemModel(ChemModel):
         params.update({'batch_size': 256})
         return params
 
-    def prepare_specific_model(self) -> None:
+    def prepare_specific_graph_model(self) -> None:
         h_dim = self.params['hidden_size']
         # inputs
         self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32,

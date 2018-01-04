@@ -47,8 +47,10 @@ class MLP(object):
     def make_network_params(self):
         dims = [self.in_size] + self.hid_sizes + [self.out_size]
         weight_sizes = list(zip(dims[:-1], dims[1:]))
-        weights = [tf.Variable(self.init_weights(s)) for s in weight_sizes]
-        biases = [tf.Variable(np.zeros(s[-1]).astype(np.float32)) for s in weight_sizes]
+        weights = [tf.Variable(self.init_weights(s), name='MLP_W_layer%i' % i)
+                   for (i, s) in enumerate(weight_sizes)]
+        biases = [tf.Variable(np.zeros(s[-1]).astype(np.float32), name='MLP_b_layer%i' % i)
+                  for (i, s) in enumerate(weight_sizes)]
 
         network_params = {
             "weights": weights,

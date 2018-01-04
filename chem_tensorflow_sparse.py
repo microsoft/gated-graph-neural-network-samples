@@ -5,10 +5,12 @@ Usage:
 
 Options:
     -h --help                Show this screen.
-    --config-file FILE       Hyperparameter configuration file path (in JSON format)
-    --config CONFIG          Hyperparameter configuration dictionary (in JSON format)
-    --log_dir NAME           log dir name
-    --data_dir NAME          data dir name
+    --config-file FILE       Hyperparameter configuration file path (in JSON format).
+    --config CONFIG          Hyperparameter configuration dictionary (in JSON format).
+    --log_dir DIR            Log dir name.
+    --data_dir DIR           Data dir name.
+    --restore FILE           File to restore weights from.
+    --freeze-graph-model     Freeze weights of graph model components.
 """
 from typing import List, Tuple, Dict, Sequence, Any
 
@@ -40,7 +42,7 @@ class SparseGGNNChemModel(ChemModel):
         })
         return params
 
-    def prepare_specific_model(self) -> None:
+    def prepare_specific_graph_model(self) -> None:
         h_dim = self.params['hidden_size']
         self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32, [None, h_dim],
                                                                           name='node_features')

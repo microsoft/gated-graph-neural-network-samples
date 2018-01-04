@@ -9,6 +9,8 @@ Options:
     --config CONFIG          Hyperparameter configuration dictionary (in JSON format)
     --log_dir NAME           log dir name
     --data_dir NAME          data dir name
+    --restore FILE           File to restore weights from.
+    --freeze-graph-model     Freeze weights of graph model components.
 '''
 from typing import Tuple, Sequence, Any
 
@@ -34,7 +36,7 @@ class SparseGCNChemModel(ChemModel):
                        'gcn_use_bias': False})
         return params
 
-    def prepare_specific_model(self) -> None:
+    def prepare_specific_graph_model(self) -> None:
         h_dim = self.params['hidden_size']
         self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32, [None, h_dim],
                                                                           name='node_features')
