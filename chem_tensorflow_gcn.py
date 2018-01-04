@@ -75,11 +75,10 @@ class SparseGCNChemModel(ChemModel):
 
             return cur_node_states
 
-    def gated_regression(self, last_h):
+    def gated_regression(self, last_h, regression_gate, regression_transform):
         # last_h: [v x h]
         gate_input = tf.concat([last_h, self.placeholders['initial_node_representation']], axis=-1)  # [v x 2h]
-        gated_outputs = tf.nn.sigmoid(self.weights['regression_gate'](gate_input)) \
-                                      * self.weights['regression_transform'](last_h)  # [v x 1]
+        gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)    # [(b*v) x 1]
 
         # Sum up all nodes per-graph
         num_nodes = tf.shape(gate_input, out_type=tf.int64)[0]
@@ -97,7 +96,7 @@ class SparseGCNChemModel(ChemModel):
             processed_graphs.append({"adjacency_list": adjacency_list,
                                      "adjacency_weights": adjacency_weights,
                                      "init": d["node_features"],
-                                     "label": d["targets"][self.params['task_id']][0]})
+                                     "labels": [d["targets"][task_id][0] for task_id in self.params['task_ids']]})
 
         return processed_graphs
 
@@ -156,7 +155,7 @@ class SparseGCNChemModel(ChemModel):
                 batch_adjacency_list.append(cur_graph['adjacency_list'] + node_offset)
                 batch_adjacency_weights.append(cur_graph['adjacency_weights'])
 
-                batch_graph_target_values.append(cur_graph['label'])
+                batch_graph_target_values.append(cur_graph['labels'])
                 num_graphs += 1
                 num_graphs_in_batch += 1
                 node_offset += num_nodes_in_graph
@@ -166,7 +165,7 @@ class SparseGCNChemModel(ChemModel):
                 self.placeholders['adjacency_list']: np.concatenate(batch_adjacency_list, axis=0),
                 self.placeholders['adjacency_weights']: np.concatenate(batch_adjacency_weights, axis=0),
                 self.placeholders['graph_nodes_list']: np.array(batch_graph_nodes_list, dtype=np.int32),
-                self.placeholders['target_values']: np.array(batch_graph_target_values),
+                self.placeholders['target_values']: np.transpose(batch_graph_target_values, axes=[1,0]),
                 self.placeholders['num_graphs']: num_graphs_in_batch,
             }
 

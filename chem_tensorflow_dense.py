@@ -86,13 +86,12 @@ class DenseGGNNChemModel(ChemModel):
             last_h = tf.reshape(h, [-1, v, h_dim])
         return last_h
 
-    def gated_regression(self, last_h):
+    def gated_regression(self, last_h, regression_gate, regression_transform):
         # last_h: [b x v x h]
         gate_input = tf.concat([last_h, self.placeholders['initial_node_representation']], axis = 2)     # [b x v x 2h]
         gate_input = tf.reshape(gate_input, [-1, 2 * self.params["hidden_size"]])                        # [(b*v) x 2h]
         last_h = tf.reshape(last_h, [-1, self.params["hidden_size"]])                                    # [(b*v) x h]
-        gated_outputs = tf.nn.sigmoid(self.weights['regression_gate'](gate_input)) \
-                                      * self.weights['regression_transform'](last_h)                     # [(b*v) x 1]
+        gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)        # [(b*v) x 1]
         gated_outputs = tf.reshape(gated_outputs, [-1, self.placeholders['num_vertices']])               # [b x v]
         output = tf.reduce_sum(gated_outputs, axis = 1)                                                  # [b]
         return output
@@ -110,7 +109,7 @@ class DenseGGNNChemModel(ChemModel):
                 'adj_mat': graph_to_adj_mat(d['graph'], chosen_bucket_size, self.num_edge_types, self.params['tie_fwd_bkwd']),
                 'init': d["node_features"] + [[0 for _ in range(x_dim)] for __ in
                                               range(chosen_bucket_size - len(d["node_features"]))],
-                'label': d["targets"][self.params['task_id']][0]
+                'labels': [d["targets"][task_id][0] for task_id in self.params['task_ids']],
             })
 
         bucket_at_step = [[bucket_idx for _ in range(len(bucket_data) // self.params['batch_size'])]
@@ -132,11 +131,11 @@ class DenseGGNNChemModel(ChemModel):
             start_idx = bucket_counters[bucket] * self.params['batch_size']
             end_idx = (bucket_counters[bucket] + 1) * self.params['batch_size']
             elements = bucketed[bucket][start_idx:end_idx]
-            batch_data = {'adj_mat': [], 'init': [], 'label': []}
+            batch_data = {'adj_mat': [], 'init': [], 'labels': []}
             for d in elements:
                 batch_data['adj_mat'].append(d['adj_mat'])
                 batch_data['init'].append(d['init'])
-                batch_data['label'].append(d['label'])
+                batch_data['labels'].append(d['labels'])
 
             num_graphs = len(batch_data['init'])
             initial_representations = batch_data['init']
@@ -145,7 +144,7 @@ class DenseGGNNChemModel(ChemModel):
                                              mode='constant')
             batch_feed_dict = {
                 self.placeholders['initial_node_representation']: initial_representations,
-                self.placeholders['target_values']: batch_data['label'],
+                self.placeholders['target_values']: np.transpose(batch_data['labels'], axes=[1,0]),
                 self.placeholders['num_graphs']: num_graphs,
                 self.placeholders['num_vertices']: bucket_sizes[bucket],
                 self.placeholders['adjacency_matrix']: batch_data['adj_mat'],
