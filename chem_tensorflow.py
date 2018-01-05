@@ -122,10 +122,12 @@ class ChemModel(object):
         self.ops['losses'] = []
         for (internal_id, task_id) in enumerate(self.params['task_ids']):
             with tf.variable_scope("out_layer_task%i" % task_id):
-                self.weights['regression_gate_task%i' % task_id] = MLP(2 * self.params['hidden_size'], 1, [],
-                                                                       self.placeholders['dropout_keep_prob'])
-                self.weights['regression_transform_task%i' % task_id] = MLP(self.params['hidden_size'], 1, [],
-                                                                            self.placeholders['dropout_keep_prob'])
+                with tf.variable_scope("regression_gate"):
+                    self.weights['regression_gate_task%i' % task_id] = MLP(2 * self.params['hidden_size'], 1, [],
+                                                                           self.placeholders['dropout_keep_prob'])
+                with tf.variable_scope("regression"):
+                    self.weights['regression_transform_task%i' % task_id] = MLP(self.params['hidden_size'], 1, [],
+                                                                                self.placeholders['dropout_keep_prob'])
                 computed_values = self.gated_regression(self.ops['final_node_representations'],
                                                         self.weights['regression_gate_task%i' % task_id],
                                                         self.weights['regression_transform_task%i' % task_id])
