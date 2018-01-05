@@ -292,11 +292,16 @@ class ChemModel(object):
         variables_to_initialize = []
         with tf.name_scope("restore"):
             restore_ops = []
+            used_vars = set()
             for variable in self.sess.graph.get_collection(tf.GraphKeys.GLOBAL_VARIABLES):
+                used_vars.add(variable.name)
                 if variable.name in data_to_load['weights']:
                     restore_ops.append(variable.assign(data_to_load['weights'][variable.name]))
                 else:
                     print('Freshly initializing %s since no saved value was found.' % variable.name)
                     variables_to_initialize.append(variable)
+            for var_name in data_to_load['weights']:
+                if var_name not in used_vars:
+                    print('Saved weights for %s not used by model.' % var_name)
             restore_ops.append(tf.variables_initializer(variables_to_initialize))
             self.sess.run(restore_ops)
