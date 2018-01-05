@@ -25,6 +25,7 @@ class ChemModel(object):
 
             'hidden_size': 100,
             'num_timesteps': 4,
+            'use_graph': True,
 
             'tie_fwd_bkwd': True,
             'task_ids': [0],
@@ -127,7 +128,10 @@ class ChemModel(object):
         with tf.variable_scope("graph_model"):
             self.prepare_specific_graph_model()
             # This does the actual graph work:
-            self.ops['final_node_representations'] = self.compute_final_node_representations()
+            if self.params['use_graph']:
+                self.ops['final_node_representations'] = self.compute_final_node_representations()
+            else:
+                self.ops['final_node_representations'] = tf.zeros_like(self.placeholders['initial_node_representation'])
 
         self.ops['losses'] = []
         for (internal_id, task_id) in enumerate(self.params['task_ids']):
