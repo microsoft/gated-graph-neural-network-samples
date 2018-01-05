@@ -34,9 +34,9 @@ class SparseGGNNChemModel(ChemModel):
         params = dict(super().default_params())
         params.update({
             'batch_size': 100000,
-            'use_edge_bias': True,
-            'use_edge_msg_avg_aggregation': False,
-            'tie_gnn_layers': True,
+            'use_edge_bias': False,
+            'use_edge_msg_avg_aggregation': True,
+            'tie_gnn_layers': False,
             'graph_rnn_cell': 'GRU',  # GRU or RNN
             'graph_rnn_activation': 'tanh',  # tanh, ReLU
         })
