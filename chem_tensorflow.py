@@ -8,6 +8,7 @@ import os
 import json
 import numpy as np
 import pickle
+import random
 
 from utils import MLP, ThreadedIterator
 
@@ -27,6 +28,8 @@ class ChemModel(object):
 
             'tie_fwd_bkwd': True,
             'task_ids': [0],
+
+            'random_seed': 0,
         }
 
     def __init__(self, args):
@@ -65,19 +68,26 @@ class ChemModel(object):
         self.valid_data = self.load_data("molecules_valid.json")
 
         # Build the actual model
-        self.sess = tf.Session()
-        self.placeholders = {}
-        self.weights = {}
-        self.ops = {}
-        self.make_model()
-        self.make_train_step()
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        self.graph = tf.Graph()
+        self.sess = tf.Session(graph=self.graph, config=config)
+        with self.graph.as_default():
+            random.seed(params['random_seed'])
+            np.random.seed(params['random_seed'])
+            tf.set_random_seed(params['random_seed'])
+            self.placeholders = {}
+            self.weights = {}
+            self.ops = {}
+            self.make_model()
+            self.make_train_step()
 
-        # Restore/initialize variables:
-        restore_file = args.get('--restore')
-        if restore_file is not None:
-            self.restore_model(restore_file)
-        else:
-            self.initialize_model()
+            # Restore/initialize variables:
+            restore_file = args.get('--restore')
+            if restore_file is not None:
+                self.restore_model(restore_file)
+            else:
+                self.initialize_model()
 
     def load_data(self, file_name):
         full_path = os.path.join(self.data_dir, file_name)
@@ -211,52 +221,53 @@ class ChemModel(object):
     def train(self):
         log_to_save = []
         total_time_start = time.time()
-        if self.args.get('--restore') is not None:
-            _, valid_accs, _, _ = self.run_epoch("Resumed (validation)", self.valid_data, False)
-            best_val_acc = np.sum(valid_accs)
-            best_val_acc_epoch = 0
-            print("\r\x1b[KResumed operation, initial cum. val. acc: %.5f" % best_val_acc)
-        else:
-            (best_val_acc, best_val_acc_epoch) = (float("+inf"), 0)
-        for epoch in range(1, self.params['num_epochs'] + 1):
-            print("== Epoch %i" % epoch)
-            train_loss, train_accs, train_errs, train_speed = self.run_epoch("epoch %i (training)" % epoch,
-                                                                             self.train_data, True)
-            accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], train_accs)])
-            errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], train_errs)])
-            print("\r\x1b[K Train: loss: %.5f | acc: %s | error_ratio: %s | instances/sec: %.2f" % (train_loss,
-                                                                                                    accs_str,
-                                                                                                    errs_str,
-                                                                                                    train_speed))
-            valid_loss, valid_accs, valid_errs, valid_speed = self.run_epoch("epoch %i (validation)" % epoch,
-                                                                             self.valid_data, False)
-            accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], valid_accs)])
-            errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], valid_errs)])
-            print("\r\x1b[K Valid: loss: %.5f | acc: %s | error_ratio: %s | instances/sec: %.2f" % (valid_loss,
-                                                                                                    accs_str,
-                                                                                                    errs_str,
-                                                                                                    valid_speed))
+        with self.graph.as_default():
+            if self.args.get('--restore') is not None:
+                _, valid_accs, _, _ = self.run_epoch("Resumed (validation)", self.valid_data, False)
+                best_val_acc = np.sum(valid_accs)
+                best_val_acc_epoch = 0
+                print("\r\x1b[KResumed operation, initial cum. val. acc: %.5f" % best_val_acc)
+            else:
+                (best_val_acc, best_val_acc_epoch) = (float("+inf"), 0)
+            for epoch in range(1, self.params['num_epochs'] + 1):
+                print("== Epoch %i" % epoch)
+                train_loss, train_accs, train_errs, train_speed = self.run_epoch("epoch %i (training)" % epoch,
+                                                                                 self.train_data, True)
+                accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], train_accs)])
+                errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], train_errs)])
+                print("\r\x1b[K Train: loss: %.5f | acc: %s | error_ratio: %s | instances/sec: %.2f" % (train_loss,
+                                                                                                        accs_str,
+                                                                                                        errs_str,
+                                                                                                        train_speed))
+                valid_loss, valid_accs, valid_errs, valid_speed = self.run_epoch("epoch %i (validation)" % epoch,
+                                                                                 self.valid_data, False)
+                accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], valid_accs)])
+                errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], valid_errs)])
+                print("\r\x1b[K Valid: loss: %.5f | acc: %s | error_ratio: %s | instances/sec: %.2f" % (valid_loss,
+                                                                                                        accs_str,
+                                                                                                        errs_str,
+                                                                                                        valid_speed))
 
-            epoch_time = time.time() - total_time_start
-            log_entry = {
-                'epoch': epoch,
-                'time': epoch_time,
-                'train_results': (train_loss, train_accs.tolist(), train_errs.tolist(), train_speed),
-                'valid_results': (valid_loss, valid_accs.tolist(), valid_errs.tolist(), valid_speed),
-            }
-            log_to_save.append(log_entry)
-            with open(self.log_file, 'w') as f:
-                json.dump(log_to_save, f, indent=4)
+                epoch_time = time.time() - total_time_start
+                log_entry = {
+                    'epoch': epoch,
+                    'time': epoch_time,
+                    'train_results': (train_loss, train_accs.tolist(), train_errs.tolist(), train_speed),
+                    'valid_results': (valid_loss, valid_accs.tolist(), valid_errs.tolist(), valid_speed),
+                }
+                log_to_save.append(log_entry)
+                with open(self.log_file, 'w') as f:
+                    json.dump(log_to_save, f, indent=4)
 
-            val_acc = np.sum(valid_accs)  # type: float
-            if val_acc < best_val_acc:
-                self.save_model(self.best_model_file)
-                print("  (Best epoch so far, cum. val. acc decreased to %.5f from %.5f. Saving to '%s')" % (val_acc, best_val_acc, self.best_model_file))
-                best_val_acc = val_acc
-                best_val_acc_epoch = epoch
-            elif epoch - best_val_acc_epoch >= self.params['patience']:
-                print("Stopping training after %i epochs without improvement on validation accuracy." % self.params['patience'])
-                break
+                val_acc = np.sum(valid_accs)  # type: float
+                if val_acc < best_val_acc:
+                    self.save_model(self.best_model_file)
+                    print("  (Best epoch so far, cum. val. acc decreased to %.5f from %.5f. Saving to '%s')" % (val_acc, best_val_acc, self.best_model_file))
+                    best_val_acc = val_acc
+                    best_val_acc_epoch = epoch
+                elif epoch - best_val_acc_epoch >= self.params['patience']:
+                    print("Stopping training after %i epochs without improvement on validation accuracy." % self.params['patience'])
+                    break
 
     def save_model(self, path: str) -> None:
         weights_to_save = {}
