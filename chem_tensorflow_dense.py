@@ -42,12 +42,16 @@ class DenseGGNNChemModel(ChemModel):
     @classmethod
     def default_params(cls):
         params = dict(super().default_params())
-        params.update({'batch_size': 256})
+        params.update({
+                        'batch_size': 256,
+                        'graph_state_dropout_keep_prob': 1.
+                      })
         return params
 
     def prepare_specific_graph_model(self) -> None:
         h_dim = self.params['hidden_size']
         # inputs
+        self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
         self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32,
                                                                           [None, None, self.params['hidden_size']],
                                                                           name='node_features')
@@ -60,7 +64,10 @@ class DenseGGNNChemModel(ChemModel):
         self.weights['edge_weights'] = tf.Variable(glorot_init([self.num_edge_types, h_dim, h_dim]))
         self.weights['edge_biases'] = tf.Variable(np.zeros([self.num_edge_types, 1, h_dim]).astype(np.float32))
         with tf.variable_scope("gru_scope"):
-            self.weights['node_gru'] = tf.contrib.rnn.GRUCell(h_dim)
+            cell = tf.contrib.rnn.GRUCell(h_dim)
+            cell = tf.nn.rnn_cell.DropoutWrapper(cell,
+                                                 state_keep_prob=self.placeholders['graph_state_keep_prob'])
+            self.weights['node_gru'] = cell
 
     def compute_final_node_representations(self) -> tf.Tensor:
         v = self.placeholders['num_vertices']
@@ -84,7 +91,8 @@ class DenseGGNNChemModel(ChemModel):
                     else:
                         acts += tf.matmul(self.__adjacency_matrix[edge_type], m)
                 acts = tf.reshape(acts, [-1, h_dim])  # [b*v x h]
-                h = self.weights['node_gru'](acts, h)[0]  # [b*v x h]
+
+                h = self.weights['node_gru'](acts, h)[1]  # [b*v x h]
             last_h = tf.reshape(h, [-1, v, h_dim])
         return last_h
 
@@ -128,6 +136,7 @@ class DenseGGNNChemModel(ChemModel):
                 np.random.shuffle(bucketed_data)
 
         bucket_counters = defaultdict(int)
+        dropout_keep_prob = self.params['graph_state_dropout_keep_prob'] if is_training else 1.
         for step in range(len(bucket_at_step)):
             bucket = bucket_at_step[step]
             start_idx = bucket_counters[bucket] * self.params['batch_size']
@@ -150,6 +159,7 @@ class DenseGGNNChemModel(ChemModel):
                 self.placeholders['num_graphs']: num_graphs,
                 self.placeholders['num_vertices']: bucket_sizes[bucket],
                 self.placeholders['adjacency_matrix']: batch_data['adj_mat'],
+                self.placeholders['graph_state_keep_prob']: dropout_keep_prob,
             }
 
             yield batch_feed_dict

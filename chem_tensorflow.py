@@ -21,7 +21,7 @@ class ChemModel(object):
             'patience': 25,
             'learning_rate': 0.0001,
             'clamp_gradient_norm': 1.0,
-            'dropout_keep_prob': 1.0,
+            'out_layer_dropout_keep_prob': 1.0,
 
             'hidden_size': 100,
             'num_timesteps': 4,
@@ -123,7 +123,7 @@ class ChemModel(object):
         self.placeholders['target_values'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None],
                                                             name='target_values')
         self.placeholders['num_graphs'] = tf.placeholder(tf.int64, [], name='num_graphs')
-        self.placeholders['dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='dropout_keep_prob')
+        self.placeholders['out_layer_dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='out_layer_dropout_keep_prob')
 
         with tf.variable_scope("graph_model"):
             self.prepare_specific_graph_model()
@@ -138,10 +138,10 @@ class ChemModel(object):
             with tf.variable_scope("out_layer_task%i" % task_id):
                 with tf.variable_scope("regression_gate"):
                     self.weights['regression_gate_task%i' % task_id] = MLP(2 * self.params['hidden_size'], 1, [],
-                                                                           self.placeholders['dropout_keep_prob'])
+                                                                           self.placeholders['out_layer_dropout_keep_prob'])
                 with tf.variable_scope("regression"):
                     self.weights['regression_transform_task%i' % task_id] = MLP(self.params['hidden_size'], 1, [],
-                                                                                self.placeholders['dropout_keep_prob'])
+                                                                                self.placeholders['out_layer_dropout_keep_prob'])
                 computed_values = self.gated_regression(self.ops['final_node_representations'],
                                                         self.weights['regression_gate_task%i' % task_id],
                                                         self.weights['regression_transform_task%i' % task_id])
@@ -200,10 +200,10 @@ class ChemModel(object):
             num_graphs = batch_data[self.placeholders['num_graphs']]
             processed_graphs += num_graphs
             if is_training:
-                batch_data[self.placeholders['dropout_keep_prob']] = self.params['dropout_keep_prob']
+                batch_data[self.placeholders['out_layer_dropout_keep_prob']] = self.params['out_layer_dropout_keep_prob']
                 fetch_list = [self.ops['loss'], accuracy_ops, self.ops['train_step']]
             else:
-                batch_data[self.placeholders['dropout_keep_prob']] = 1.0
+                batch_data[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
                 fetch_list = [self.ops['loss'], accuracy_ops]
             result = self.sess.run(fetch_list, feed_dict=batch_data)
             (batch_loss, batch_accuracies) = (result[0], result[1])
