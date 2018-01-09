@@ -151,6 +151,8 @@ class DenseGGNNChemModel(ChemModel):
                 self.placeholders['adjacency_matrix']: batch_data['adj_mat'],
             }
 
+            bucket_counters[bucket] += 1
+
             yield batch_feed_dict
 
 
