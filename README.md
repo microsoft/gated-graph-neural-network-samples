@@ -3,9 +3,9 @@ This repository contains two implementations of the Gated Graph Neural Networks
 of [Li et al. 2015](https://arxiv.org/abs/1511.05493) for learning properties of chemical molecules.
 The inspiration for this application comes from [Gilmer et al. 2017](https://arxiv.org/abs/1704.01212).
 
-This code was tested in Python 3.5 with TensorFlow 1.3.
+This code was tested in Python 3.5 with TensorFlow 1.3. To run the code `docopt` is also necessary.
 
-To run the code `docopt` is also necessary.
+This code is maintained by the [Deep Program Understanding](https://www.microsoft.com/en-us/research/project/program/) project at Microsoft Research, Cambridge, UK.
 
 ## Data Extraction
 To download the related data run `get_data.py`. It requires the python package `rdkit` within the Python package
