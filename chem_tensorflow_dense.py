@@ -162,6 +162,8 @@ class DenseGGNNChemModel(ChemModel):
                 self.placeholders['graph_state_keep_prob']: dropout_keep_prob,
             }
 
+            bucket_counters[bucket] += 1
+
             yield batch_feed_dict
 
 
