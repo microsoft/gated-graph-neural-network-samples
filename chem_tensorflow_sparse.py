@@ -39,7 +39,8 @@ class SparseGGNNChemModel(ChemModel):
             'tie_gnn_layers': False,
             'graph_rnn_cell': 'GRU',  # GRU or RNN
             'graph_rnn_activation': 'tanh',  # tanh, ReLU
-            'graph_state_dropout_keep_prob': 1.
+            'graph_state_dropout_keep_prob': 1.,
+            'task_sample_ratios': {},
         })
         return params
 
@@ -146,7 +147,7 @@ class SparseGGNNChemModel(ChemModel):
         return tf.squeeze(tf.sparse_tensor_dense_matmul(graph_nodes, gated_outputs), axis=[-1])  # [g]
 
     # ----- Data preprocessing and chunking into minibatches:
-    def process_raw_graphs(self, raw_data: Sequence[Any]) -> Any:
+    def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool) -> Any:
         processed_graphs = []
         for d in raw_data:
             (adjacency_lists, num_incoming_edge_per_type) = self.__graph_to_adjacency_lists(d['graph'])
@@ -154,6 +155,15 @@ class SparseGGNNChemModel(ChemModel):
                                      "num_incoming_edge_per_type": num_incoming_edge_per_type,
                                      "init": d["node_features"],
                                      "labels": [d["targets"][task_id][0] for task_id in self.params['task_ids']]})
+
+        if is_training_data:
+            np.random.shuffle(processed_graphs)
+            for task_id in self.params['task_ids']:
+                task_sample_ratio = self.params['task_sample_ratios'].get(str(task_id))
+                if task_sample_ratio is not None:
+                    ex_to_sample = int(len(processed_graphs) * task_sample_ratio)
+                    for ex_id in range(ex_to_sample, len(processed_graphs)):
+                        processed_graphs[ex_id]['labels'][task_id] = None
 
         return processed_graphs
 
@@ -192,7 +202,8 @@ class SparseGGNNChemModel(ChemModel):
         while num_graphs < len(data):
             num_graphs_in_batch = 0
             batch_node_features = []
-            batch_graph_target_values = []
+            batch_target_task_values = []
+            batch_target_task_mask = []
             batch_adjacency_lists = [[] for _ in range(self.num_edge_types)]
             batch_num_incoming_edges_per_type = []
             batch_graph_nodes_list = []
@@ -218,7 +229,17 @@ class SparseGGNNChemModel(ChemModel):
                         num_incoming_edges_per_type[node_id, e_type] = edge_count
                 batch_num_incoming_edges_per_type.append(num_incoming_edges_per_type)
 
-                batch_graph_target_values.append(cur_graph['labels'])
+                target_task_values = []
+                target_task_mask = []
+                for target_val in cur_graph['labels']:
+                    if target_val is None:  # This is one of the examples we didn't sample...
+                        target_task_values.append(0.)
+                        target_task_mask.append(0.)
+                    else:
+                        target_task_values.append(target_val)
+                        target_task_mask.append(1.)
+                batch_target_task_values.append(target_task_values)
+                batch_target_task_mask.append(target_task_mask)
                 num_graphs += 1
                 num_graphs_in_batch += 1
                 node_offset += num_nodes_in_graph
@@ -227,7 +248,8 @@ class SparseGGNNChemModel(ChemModel):
                 self.placeholders['initial_node_representation']: np.array(batch_node_features),
                 self.placeholders['num_incoming_edges_per_type']: np.concatenate(batch_num_incoming_edges_per_type, axis=0),
                 self.placeholders['graph_nodes_list']: np.array(batch_graph_nodes_list, dtype=np.int32),
-                self.placeholders['target_values']: np.transpose(batch_graph_target_values, axes=[1,0]),
+                self.placeholders['target_values']: np.transpose(batch_target_task_values, axes=[1,0]),
+                self.placeholders['target_mask']: np.transpose(batch_target_task_mask, axes=[1, 0]),
                 self.placeholders['num_graphs']: num_graphs_in_batch,
                 self.placeholders['graph_state_keep_prob']: dropout_keep_prob,
             }

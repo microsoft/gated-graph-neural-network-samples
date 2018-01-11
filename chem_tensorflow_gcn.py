@@ -91,7 +91,7 @@ class SparseGCNChemModel(ChemModel):
         return tf.squeeze(tf.sparse_tensor_dense_matmul(graph_nodes, gated_outputs), axis=[-1])  # [g]
 
     # ----- Data preprocessing and chunking into minibatches:
-    def process_raw_graphs(self, raw_data: Sequence[Any]) -> Any:
+    def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool) -> Any:
         processed_graphs = []
         for d in raw_data:
             (adjacency_list, adjacency_weights) = self.__graph_to_adjacency_list(d['graph'], len(d["node_features"]))
@@ -99,6 +99,15 @@ class SparseGCNChemModel(ChemModel):
                                      "adjacency_weights": adjacency_weights,
                                      "init": d["node_features"],
                                      "labels": [d["targets"][task_id][0] for task_id in self.params['task_ids']]})
+
+        if is_training_data:
+            np.random.shuffle(processed_graphs)
+            for task_id in self.params['task_ids']:
+                task_sample_ratio = self.params['task_sample_ratios'].get(str(task_id))
+                if task_sample_ratio is not None:
+                    ex_to_sample = int(len(processed_graphs) * task_sample_ratio)
+                    for ex_id in range(ex_to_sample, len(processed_graphs)):
+                        processed_graphs[ex_id]['labels'][task_id] = None
 
         return processed_graphs
 
@@ -140,7 +149,8 @@ class SparseGCNChemModel(ChemModel):
         while num_graphs < len(data):
             num_graphs_in_batch = 0
             batch_node_features = []
-            batch_graph_target_values = []
+            batch_target_task_values = []
+            batch_target_task_mask = []
             batch_adjacency_list = []
             batch_adjacency_weights = []
             batch_graph_nodes_list = []
@@ -157,7 +167,17 @@ class SparseGCNChemModel(ChemModel):
                 batch_adjacency_list.append(cur_graph['adjacency_list'] + node_offset)
                 batch_adjacency_weights.append(cur_graph['adjacency_weights'])
 
-                batch_graph_target_values.append(cur_graph['labels'])
+                target_task_values = []
+                target_task_mask = []
+                for target_val in cur_graph['labels']:
+                    if target_val is None:  # This is one of the examples we didn't sample...
+                        target_task_values.append(0.)
+                        target_task_mask.append(0.)
+                    else:
+                        target_task_values.append(target_val)
+                        target_task_mask.append(1.)
+                batch_target_task_values.append(target_task_values)
+                batch_target_task_mask.append(target_task_mask)
                 num_graphs += 1
                 num_graphs_in_batch += 1
                 node_offset += num_nodes_in_graph
@@ -167,7 +187,8 @@ class SparseGCNChemModel(ChemModel):
                 self.placeholders['adjacency_list']: np.concatenate(batch_adjacency_list, axis=0),
                 self.placeholders['adjacency_weights']: np.concatenate(batch_adjacency_weights, axis=0),
                 self.placeholders['graph_nodes_list']: np.array(batch_graph_nodes_list, dtype=np.int32),
-                self.placeholders['target_values']: np.transpose(batch_graph_target_values, axes=[1,0]),
+                self.placeholders['target_values']: np.transpose(batch_target_task_values, axes=[1,0]),
+                self.placeholders['target_mask']: np.transpose(batch_target_task_mask, axes=[1, 0]),
                 self.placeholders['num_graphs']: num_graphs_in_batch,
             }
 

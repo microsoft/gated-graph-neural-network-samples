@@ -10,7 +10,7 @@ import numpy as np
 import pickle
 import random
 
-from utils import MLP, ThreadedIterator
+from utils import MLP, ThreadedIterator, SMALL_NUMBER
 
 
 class ChemModel(object):
@@ -65,8 +65,8 @@ class ChemModel(object):
         self.max_num_vertices = 0
         self.num_edge_types = 0
         self.annotation_size = 0
-        self.train_data = self.load_data("molecules_train.json")
-        self.valid_data = self.load_data("molecules_valid.json")
+        self.train_data = self.load_data("molecules_train.json", is_training_data=True)
+        self.valid_data = self.load_data("molecules_valid.json", is_training_data=False)
 
         # Build the actual model
         config = tf.ConfigProto()
@@ -90,7 +90,7 @@ class ChemModel(object):
             else:
                 self.initialize_model()
 
-    def load_data(self, file_name):
+    def load_data(self, file_name, is_training_data: bool):
         full_path = os.path.join(self.data_dir, file_name)
 
         print("Loading data from %s" % full_path)
@@ -109,19 +109,21 @@ class ChemModel(object):
         self.num_edge_types = max(self.num_edge_types, num_fwd_edge_types * (1 if self.params['tie_fwd_bkwd'] else 2))
         self.annotation_size = max(self.annotation_size, len(data[0]["node_features"][0]))
 
-        return self.process_raw_graphs(data)
+        return self.process_raw_graphs(data, is_training_data)
 
     @staticmethod
     def graph_string_to_array(graph_string: str) -> List[List[int]]:
         return [[int(v) for v in s.split(' ')]
                 for s in graph_string.split('\n')]
 
-    def process_raw_graphs(self, raw_data: Sequence[Any]) -> Any:
+    def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool) -> Any:
         raise Exception("Models have to implement process_raw_graphs!")
 
     def make_model(self):
         self.placeholders['target_values'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None],
                                                             name='target_values')
+        self.placeholders['target_mask'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None],
+                                                          name='target_mask')
         self.placeholders['num_graphs'] = tf.placeholder(tf.int64, [], name='num_graphs')
         self.placeholders['out_layer_dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='out_layer_dropout_keep_prob')
 
@@ -146,8 +148,14 @@ class ChemModel(object):
                                                         self.weights['regression_gate_task%i' % task_id],
                                                         self.weights['regression_transform_task%i' % task_id])
                 diff = computed_values - self.placeholders['target_values'][internal_id,:]
-                self.ops['accuracy_task%i' % task_id] = tf.reduce_mean(tf.abs(diff))
-                self.ops['losses'].append(tf.reduce_mean(0.5 * diff ** 2))
+                task_target_mask = self.placeholders['target_mask'][internal_id,:]
+                task_target_num = tf.reduce_sum(task_target_mask) + SMALL_NUMBER
+                diff = diff * task_target_mask  # Mask out unused values
+                self.ops['accuracy_task%i' % task_id] = tf.reduce_sum(tf.abs(diff)) / task_target_num
+                task_loss = tf.reduce_sum(0.5 * tf.square(diff)) / task_target_num
+                # Normalise loss to account for fewer task-specific examples in batch:
+                task_loss = task_loss * (1.0 / (self.params['task_sample_ratios'].get(task_id) or 1.0))
+                self.ops['losses'].append(task_loss)
         self.ops['loss'] = tf.reduce_sum(self.ops['losses'])
 
     def make_train_step(self):

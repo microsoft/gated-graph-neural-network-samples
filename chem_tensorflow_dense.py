@@ -107,7 +107,7 @@ class DenseGGNNChemModel(ChemModel):
         return output
 
     # ----- Data preprocessing and chunking into minibatches:
-    def process_raw_graphs(self, raw_data: Sequence[Any]) -> Any:
+    def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool) -> Any:
         bucket_sizes = np.array(list(range(4, 28, 2)) + [29])
         bucketed = defaultdict(list)
         x_dim = len(raw_data[0]["node_features"][0])
@@ -121,6 +121,16 @@ class DenseGGNNChemModel(ChemModel):
                                               range(chosen_bucket_size - len(d["node_features"]))],
                 'labels': [d["targets"][task_id][0] for task_id in self.params['task_ids']],
             })
+
+        if is_training_data:
+            for (bucket_idx, bucket) in bucketed.items():
+                np.random.shuffle(bucket)
+                for task_id in self.params['task_ids']:
+                    task_sample_ratio = self.params['task_sample_ratios'].get(str(task_id))
+                    if task_sample_ratio is not None:
+                        ex_to_sample = int(len(bucket) * task_sample_ratio)
+                        for ex_id in range(ex_to_sample, len(bucket)):
+                            bucket[ex_id]['labels'][task_id] = None
 
         bucket_at_step = [[bucket_idx for _ in range(len(bucket_data) // self.params['batch_size'])]
                           for bucket_idx, bucket_data in bucketed.items()]
@@ -142,11 +152,22 @@ class DenseGGNNChemModel(ChemModel):
             start_idx = bucket_counters[bucket] * self.params['batch_size']
             end_idx = (bucket_counters[bucket] + 1) * self.params['batch_size']
             elements = bucketed[bucket][start_idx:end_idx]
-            batch_data = {'adj_mat': [], 'init': [], 'labels': []}
+            batch_data = {'adj_mat': [], 'init': [], 'labels': [], 'task_masks': []}
             for d in elements:
                 batch_data['adj_mat'].append(d['adj_mat'])
                 batch_data['init'].append(d['init'])
-                batch_data['labels'].append(d['labels'])
+
+                target_task_values = []
+                target_task_mask = []
+                for target_val in d['labels']:
+                    if target_val is None:  # This is one of the examples we didn't sample...
+                        target_task_values.append(0.)
+                        target_task_mask.append(0.)
+                    else:
+                        target_task_values.append(target_val)
+                        target_task_mask.append(1.)
+                batch_data['labels'].append(target_task_values)
+                batch_data['task_masks'].append(target_task_mask)
 
             num_graphs = len(batch_data['init'])
             initial_representations = batch_data['init']
@@ -156,6 +177,7 @@ class DenseGGNNChemModel(ChemModel):
             batch_feed_dict = {
                 self.placeholders['initial_node_representation']: initial_representations,
                 self.placeholders['target_values']: np.transpose(batch_data['labels'], axes=[1,0]),
+                self.placeholders['target_mask']: np.transpose(batch_data['task_masks'], axes=[1, 0]),
                 self.placeholders['num_graphs']: num_graphs,
                 self.placeholders['num_vertices']: bucket_sizes[bucket],
                 self.placeholders['adjacency_matrix']: batch_data['adj_mat'],
