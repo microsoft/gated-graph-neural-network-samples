@@ -36,7 +36,9 @@ class SparseGGNNChemModel(ChemModel):
             'batch_size': 100000,
             'use_edge_bias': False,
             'use_edge_msg_avg_aggregation': True,
-            'tie_gnn_layers': False,
+
+            'layer_timesteps': [1, 1, 1, 1],  # number of layers & propagation steps per layer
+
             'graph_rnn_cell': 'GRU',  # GRU or RNN
             'graph_rnn_activation': 'tanh',  # tanh, ReLU
             'graph_state_dropout_keep_prob': 1.,
@@ -67,71 +69,70 @@ class SparseGGNNChemModel(ChemModel):
         self.weights['edge_weights'] = []
         self.weights['edge_biases'] = []
         self.weights['rnn_cells'] = []
-        for step in range(self.params['num_timesteps']):
-            with tf.variable_scope('gnn_layer_%i' % step):
-                if step == 0 or not(self.params['tie_gnn_layers']):
-                    self.weights['edge_weights'].append(tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
-                                                                    name='gnn_edge_weights_%i' % step))
+        for layer_idx in range(len(self.params['layer_timesteps'])):
+            with tf.variable_scope('gnn_layer_%i' % layer_idx):
+                self.weights['edge_weights'].append(tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
+                                                                name='gnn_edge_weights_%i' % layer_idx))
 
-                    if self.params['use_edge_bias']:
-                        self.weights['edge_biases'].append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
-                                                                       name='gnn_edge_biases_%i' % step))
+                if self.params['use_edge_bias']:
+                    self.weights['edge_biases'].append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
+                                                                   name='gnn_edge_biases_%i' % layer_idx))
 
-                    cell_type = self.params['graph_rnn_cell'].lower()
-                    if cell_type == 'gru':
-                        cell = tf.nn.rnn_cell.GRUCell(h_dim, activation=activation_fun)
-                    elif cell_type == 'rnn':
-                        cell = tf.nn.rnn_cell.BasicRNNCell(h_dim, activation=activation_fun)
-                    else:
-                        raise Exception("Unknown RNN cell type '%s'." % cell_type)
-                    cell = tf.nn.rnn_cell.DropoutWrapper(cell,
-                                                         state_keep_prob=self.placeholders['graph_state_keep_prob'])
-                    self.weights['rnn_cells'].append(cell)
+                cell_type = self.params['graph_rnn_cell'].lower()
+                if cell_type == 'gru':
+                    cell = tf.nn.rnn_cell.GRUCell(h_dim, activation=activation_fun)
+                elif cell_type == 'rnn':
+                    cell = tf.nn.rnn_cell.BasicRNNCell(h_dim, activation=activation_fun)
+                else:
+                    raise Exception("Unknown RNN cell type '%s'." % cell_type)
+                cell = tf.nn.rnn_cell.DropoutWrapper(cell,
+                                                     state_keep_prob=self.placeholders['graph_state_keep_prob'])
+                self.weights['rnn_cells'].append(cell)
 
     def compute_final_node_representations(self) -> tf.Tensor:
-        with tf.variable_scope('gnn_scope'):
-            cur_node_states = self.placeholders['initial_node_representation']  # number of nodes in batch v x D
-            num_nodes = tf.shape(self.placeholders['initial_node_representation'], out_type=tf.int64)[0]
+        cur_node_states = self.placeholders['initial_node_representation']  # number of nodes in batch v x D
+        num_nodes = tf.shape(self.placeholders['initial_node_representation'], out_type=tf.int64)[0]
 
-            adjacency_matrices = []  # type: List[tf.SparseTensor]
-            for adjacency_list_for_edge_type in self.placeholders['adjacency_lists']:
-                # adjacency_list_for_edge_type (shape [-1, 2]) includes all edges of type e_type of a sparse graph with v nodes (ids from 0 to v).
-                adjacency_matrix_for_edge_type = tf.SparseTensor(indices=adjacency_list_for_edge_type,
-                                                                 values=tf.ones_like(
-                                                                     adjacency_list_for_edge_type[:, 1],
-                                                                     dtype=tf.float32),
-                                                                 dense_shape=[num_nodes, num_nodes])
-                adjacency_matrices.append(adjacency_matrix_for_edge_type)
+        for (layer_idx, num_timesteps) in enumerate(self.params['layer_timesteps']):
+            with tf.variable_scope('gnn_layer_%i' % layer_idx):
+                adjacency_matrices = []  # type: List[tf.SparseTensor]
+                for adjacency_list_for_edge_type in self.placeholders['adjacency_lists']:
+                    # adjacency_list_for_edge_type (shape [-1, 2]) includes all edges of type e_type of a sparse graph with v nodes (ids from 0 to v).
+                    adjacency_matrix_for_edge_type = tf.SparseTensor(indices=adjacency_list_for_edge_type,
+                                                                     values=tf.ones_like(
+                                                                         adjacency_list_for_edge_type[:, 1],
+                                                                         dtype=tf.float32),
+                                                                     dense_shape=[num_nodes, num_nodes])
+                    adjacency_matrices.append(adjacency_matrix_for_edge_type)
 
-            for step in range(self.params['num_timesteps']):
-                effective_step = 0 if self.params['tie_gnn_layers'] else step
-                with tf.variable_scope('gnn_layer_%i' % effective_step):
-                    incoming_messages = []  # list of v x D
+                for step in range(num_timesteps):
+                    with tf.variable_scope('timestep_%i' % step):
+                        incoming_messages = []  # list of v x D
 
-                    # Collect incoming messages per edge type
-                    for adjacency_matrix in adjacency_matrices:
-                        incoming_messages_per_type = tf.sparse_tensor_dense_matmul(adjacency_matrix,
-                                                                                   cur_node_states)  # v x D
-                        incoming_messages.extend([incoming_messages_per_type])
+                        # Collect incoming messages per edge type
+                        for adjacency_matrix in adjacency_matrices:
+                            incoming_messages_per_type = tf.sparse_tensor_dense_matmul(adjacency_matrix,
+                                                                                       cur_node_states)  # v x D
+                            incoming_messages.extend([incoming_messages_per_type])
 
-                    # Pass incoming messages through linear layer:
-                    incoming_messages = tf.concat(incoming_messages, axis=1)  # v x [2 *] edge_types
-                    messages_passed = tf.matmul(incoming_messages,
-                                                self.weights['edge_weights'][effective_step])  # v x D
+                        # Pass incoming messages through linear layer:
+                        incoming_messages = tf.concat(incoming_messages, axis=1)  # v x [2 *] edge_types
+                        messages_passed = tf.matmul(incoming_messages,
+                                                    self.weights['edge_weights'][layer_idx])  # v x D
 
-                    if self.params['use_edge_bias']:
-                        messages_passed += tf.matmul(self.placeholders['num_incoming_edges_per_type'],
-                                                     self.weights['edge_biases'][effective_step])  # v x D
+                        if self.params['use_edge_bias']:
+                            messages_passed += tf.matmul(self.placeholders['num_incoming_edges_per_type'],
+                                                         self.weights['edge_biases'][layer_idx])  # v x D
 
-                    if self.params['use_edge_msg_avg_aggregation']:
-                        num_incoming_edges = tf.reduce_sum(self.placeholders['num_incoming_edges_per_type'],
-                                                           keep_dims=True, axis=-1)  # v x 1
-                        messages_passed /= num_incoming_edges + SMALL_NUMBER
+                        if self.params['use_edge_msg_avg_aggregation']:
+                            num_incoming_edges = tf.reduce_sum(self.placeholders['num_incoming_edges_per_type'],
+                                                               keep_dims=True, axis=-1)  # v x 1
+                            messages_passed /= num_incoming_edges + SMALL_NUMBER
 
-                    # pass updated vertex features into RNN cell
-                    cur_node_states = self.weights['rnn_cells'][effective_step](messages_passed, cur_node_states)[1]  # v x D
+                        # pass updated vertex features into RNN cell
+                        cur_node_states = self.weights['rnn_cells'][layer_idx](messages_passed, cur_node_states)[1]  # v x D
 
-            return cur_node_states
+        return cur_node_states
 
     def gated_regression(self, last_h, regression_gate, regression_transform):
         # last_h: [v x h]
