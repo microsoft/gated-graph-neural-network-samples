@@ -203,7 +203,7 @@ class ChemModel(object):
         accuracy_ops = [self.ops['accuracy_task%i' % task_id] for task_id in self.params['task_ids']]
         start_time = time.time()
         processed_graphs = 0
-        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=3)
+        batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=5)
         for step, batch_data in enumerate(batch_iterator):
             num_graphs = batch_data[self.placeholders['num_graphs']]
             processed_graphs += num_graphs
