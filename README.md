@@ -15,11 +15,17 @@ conda install -c rdkit rdkit
 ```
 
 ## Running Graph Neural Network Training
-We provide three versions of Graph Neural Networks: Gated Graph Neural Networks (one implementation using dense
-adjacency matrices and a sparse variant) and Graph Convolutional Networks (sparse).
+We provide four versions of Graph Neural Networks: Gated Graph Neural Networks (one implementation using dense
+adjacency matrices and a sparse variant), Asynchronous Gated Graph Neural Networks, and Graph Convolutional
+Networks (sparse).
 The dense version is faster for small or dense graphs, including the molecules dataset (though the difference is
 small for it). In contrast, the sparse version is faster for large and sparse graphs, especially in cases where
 representing a dense representation of the adjacency matrix would result in prohibitively large memory usage.
+Asynchronous GNNs do not propagate information from all nodes to all neighbouring nodes at each timestep;
+instead, they follow an update schedule such that messages are propagated in sequence. Their implementation
+is far more inefficient (due to the small number of updates at each step), but a single propagation round
+(i.e., performing each propagation step along a few edges once) can suffice to propagate messages across a
+large graph.
 
 To run dense Gated Graph Neural Networks, use
 ```
@@ -40,6 +46,11 @@ Finally, it turns out that the extension of GCN to different edge types is a var
 GCN (as in [Schlichtkrull et al. 2017](https://arxiv.org/abs/1703.06103)) by calling
 ```
 python3 ./chem_tensorflow_sparse.py --config '{"use_edge_bias": false, "use_edge_msg_avg_aggregation": true, "tie_gnn_layers": false, "graph_rnn_cell": "RNN", "graph_rnn_activation": "ReLU"}'
+```
+
+To run asynchronous Gated Graph Neural Networks, use
+```
+python3 ./chem_tensorflow_async.py
 ```
 
 ## Contributing
