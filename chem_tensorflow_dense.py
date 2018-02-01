@@ -26,8 +26,7 @@ from utils import glorot_init
 
 
 def graph_to_adj_mat(graph, max_n_vertices, num_edge_types, tie_fwd_bkwd=True):
-    amat_width = max_n_vertices if tie_fwd_bkwd else 2*max_n_vertices
-    amat = np.zeros((num_edge_types, max_n_vertices, amat_width))
+    amat = np.zeros((num_edge_types, max_n_vertices, max_n_vertices))
     for src, e, dest in graph:
         amat[e-1, dest, src] = 1
         offset = 0 if tie_fwd_bkwd else 4
@@ -44,7 +43,9 @@ class DenseGGNNChemModel(ChemModel):
         params = dict(super().default_params())
         params.update({
                         'batch_size': 256,
-                        'graph_state_dropout_keep_prob': 1.
+                        'graph_state_dropout_keep_prob': 1.,
+                        'task_sample_ratios': {},
+                        'use_edge_bias': True,
                       })
         return params
 
@@ -62,7 +63,8 @@ class DenseGGNNChemModel(ChemModel):
 
         # weights
         self.weights['edge_weights'] = tf.Variable(glorot_init([self.num_edge_types, h_dim, h_dim]))
-        self.weights['edge_biases'] = tf.Variable(np.zeros([self.num_edge_types, 1, h_dim]).astype(np.float32))
+        if self.params['use_edge_bias']:
+            self.weights['edge_biases'] = tf.Variable(np.zeros([self.num_edge_types, 1, h_dim]).astype(np.float32))
         with tf.variable_scope("gru_scope"):
             cell = tf.contrib.rnn.GRUCell(h_dim)
             cell = tf.nn.rnn_cell.DropoutWrapper(cell,
@@ -75,16 +77,25 @@ class DenseGGNNChemModel(ChemModel):
         h = self.placeholders['initial_node_representation']  # [b x v x h]
         h = tf.reshape(h, [-1, h_dim])
 
-        biases = []
-        for a in tf.unstack(self.__adjacency_matrix, axis=0):
-            summed_a = tf.reshape(tf.reduce_sum(a, axis=-1), [-1, 1])  # [b*v x 1]
-            biases.append(tf.matmul(summed_a, self.weights['edge_biases'][0]))  # [b*v x h]
+        #biases = []
+        #for a in tf.unstack(self.__adjacency_matrix, axis=0):
+        #    summed_a = tf.reshape(tf.reduce_sum(a, axis=-1), [-1, 1])  # [b*v x 1]
+        #    biases.append(tf.matmul(summed_a, self.weights['edge_biases'][0]))  # [b*v x h]
+
+        # precompute edge biases
+        if self.params['use_edge_bias']:
+            biases = []                                                                                             # e x t x [b*v x h]
+            for edge_type,a in enumerate(tf.unstack(self.__adjacency_matrix, axis=0)):
+                summed_a = tf.reshape(tf.reduce_sum(a, axis=-1), [-1, 1])                                           # [b*v x 1]
+                biases.append(tf.matmul(summed_a, self.weights['edge_biases'][edge_type]))  # [b*v x h]   
         with tf.variable_scope("gru_scope") as scope:
             for i in range(self.params['num_timesteps']):
                 if i > 0:
                     tf.get_variable_scope().reuse_variables()
                 for edge_type in range(self.num_edge_types):
-                    m = tf.matmul(h, self.weights['edge_weights'][edge_type]) + biases[edge_type]  # [b*v x h]
+                    m = tf.matmul(h, self.weights['edge_weights'][edge_type])    # [b*v x h]
+                    if self.params['use_edge_bias']:
+                        m += biases[edge_type]         # [b*v x h]
                     m = tf.reshape(m, [-1, v, h_dim])  # [b x v x h]
                     if edge_type == 0:
                         acts = tf.matmul(self.__adjacency_matrix[edge_type], m)

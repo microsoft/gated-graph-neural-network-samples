@@ -19,7 +19,7 @@ class ChemModel(object):
         return {
             'num_epochs': 3000,
             'patience': 25,
-            'learning_rate': 0.0001,
+            'learning_rate': 0.001,
             'clamp_gradient_norm': 1.0,
             'out_layer_dropout_keep_prob': 1.0,
 
@@ -60,6 +60,9 @@ class ChemModel(object):
         with open(os.path.join(log_dir, "%s_params.json" % self.run_id), "w") as f:
             json.dump(params, f)
         print("Run %s starting with following parameters:\n%s" % (self.run_id, json.dumps(self.params)))
+        random.seed(params['random_seed'])
+        np.random.seed(params['random_seed'])
+
 
         # Load data:
         self.max_num_vertices = 0
@@ -74,8 +77,6 @@ class ChemModel(object):
         self.graph = tf.Graph()
         self.sess = tf.Session(graph=self.graph, config=config)
         with self.graph.as_default():
-            random.seed(params['random_seed'])
-            np.random.seed(params['random_seed'])
             tf.set_random_seed(params['random_seed'])
             self.placeholders = {}
             self.weights = {}
@@ -169,7 +170,7 @@ class ChemModel(object):
                 else:
                     print("Freezing weights of variable %s." % var.name)
             trainable_vars = filtered_vars
-        optimizer = tf.train.AdamOptimizer()
+        optimizer = tf.train.AdamOptimizer(self.params['learning_rate'])
         grads_and_vars = optimizer.compute_gradients(self.ops['loss'], var_list=trainable_vars)
         clipped_grads = []
         for grad, var in grads_and_vars:
@@ -309,7 +310,7 @@ class ChemModel(object):
         assert len(self.params) == len(data_to_load['params'])
         for (par, par_value) in self.params.items():
             # Fine to have different task_ids:
-            if par not in ['task_ids']:
+            if par not in ['task_ids', 'num_epochs']:
                 assert par_value == data_to_load['params'][par]
 
         variables_to_initialize = []

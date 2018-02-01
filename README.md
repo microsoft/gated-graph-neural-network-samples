@@ -53,6 +53,26 @@ To run asynchronous Gated Graph Neural Networks, use
 python3 ./chem_tensorflow_async.py
 ```
 
+## Restoring models
+
+Suppose you have trained a model e.g. the following trains for a single epoch:
+
+```
+python3 ./chem_tensorflow_dense.py --config '{"num_epochs": 1}'
+== Epoch 1
+ Train: loss: 0.52315 | acc: 0:0.64241 | error_ratio: 0:9.65831 | instances/sec: 6758.04
+ Valid: loss: 0.26930 | acc: 0:0.55949 | error_ratio: 0:8.41163 | instances/sec: 9902.71
+  (Best epoch so far, cum. val. acc decreased to 0.55949 from inf. Saving to './2018-02-01-11-30-05_16306_model_best.pickle')
+```
+
+Note that a checkpoint was stored to './2018-02-01-11-30-05_16306_model_best.pickle'. To restore this model and continue training, use:
+```
+python3 ./chem_tensorflow_dense.py --restore ./2018-02-01-11-30-05_16306_model_best.pickle
+```
+
+
+
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
