@@ -35,6 +35,19 @@ def graph_to_adj_mat(graph, max_n_vertices, num_edge_types, tie_fwd_bkwd=True):
     return amat
 
 
+'''
+Comments provide the expected tensor shapes where helpful.
+
+Key to symbols in comments:
+---------------------------
+[...]:  a tensor
+; ; :   a list
+b:      batch size
+e:      number of edge types (4)
+v:      number of vertices per graph in this batch
+h:      GNN hidden size
+'''
+
 class DenseGGNNChemModel(ChemModel):
     def __init__(self, args):
         super().__init__(args)
@@ -60,8 +73,8 @@ class DenseGGNNChemModel(ChemModel):
         self.placeholders['node_mask'] = tf.placeholder(tf.float32, [None, None], name='node_mask')
         self.placeholders['num_vertices'] = tf.placeholder(tf.int32, ())
         self.placeholders['adjacency_matrix'] = tf.placeholder(tf.float32,
-                                                               [None, self.num_edge_types, None, None])  # [b x e x v x v]
-        self.__adjacency_matrix = tf.transpose(self.placeholders['adjacency_matrix'], [1, 0, 2, 3])  # [e x b x v x v]
+                                                               [None, self.num_edge_types, None, None])     # [b, e, v, v]
+        self.__adjacency_matrix = tf.transpose(self.placeholders['adjacency_matrix'], [1, 0, 2, 3])         # [e, b, v, v]
 
 
         # weights
@@ -77,42 +90,42 @@ class DenseGGNNChemModel(ChemModel):
     def compute_final_node_representations(self) -> tf.Tensor:
         v = self.placeholders['num_vertices']
         h_dim = self.params['hidden_size']
-        h = self.placeholders['initial_node_representation']  # [b x v x h]
+        h = self.placeholders['initial_node_representation']                                                # [b, v, h]
         h = tf.reshape(h, [-1, h_dim])
 
         # precompute edge biases
         if self.params['use_edge_bias']:
-            biases = []                                                                                             # e x t x [b*v x h]
+            biases = []                                                                                     # e ; t ; [b*v, h]
             for edge_type,a in enumerate(tf.unstack(self.__adjacency_matrix, axis=0)):
-                summed_a = tf.reshape(tf.reduce_sum(a, axis=-1), [-1, 1])                                           # [b*v x 1]
-                biases.append(tf.matmul(summed_a, self.weights['edge_biases'][edge_type]))  # [b*v x h]   
+                summed_a = tf.reshape(tf.reduce_sum(a, axis=-1), [-1, 1])                                   # [b*v, 1]
+                biases.append(tf.matmul(summed_a, self.weights['edge_biases'][edge_type]))                  # [b*v, h]   
         with tf.variable_scope("gru_scope") as scope:
             for i in range(self.params['num_timesteps']):
                 if i > 0:
                     tf.get_variable_scope().reuse_variables()
                 for edge_type in range(self.num_edge_types):
-                    m = tf.matmul(h, self.weights['edge_weights'][edge_type])    # [b*v x h]
+                    m = tf.matmul(h, self.weights['edge_weights'][edge_type])                               # [b*v, h]
                     if self.params['use_edge_bias']:
-                        m += biases[edge_type]         # [b*v x h]
-                    m = tf.reshape(m, [-1, v, h_dim])  # [b x v x h]
+                        m += biases[edge_type]                                                              # [b*v, h]
+                    m = tf.reshape(m, [-1, v, h_dim])                                                       # [b, v, h]
                     if edge_type == 0:
                         acts = tf.matmul(self.__adjacency_matrix[edge_type], m)
                     else:
                         acts += tf.matmul(self.__adjacency_matrix[edge_type], m)
-                acts = tf.reshape(acts, [-1, h_dim])  # [b*v x h]
+                acts = tf.reshape(acts, [-1, h_dim])                                                        # [b*v, h]
 
-                h = self.weights['node_gru'](acts, h)[1]  # [b*v x h]
+                h = self.weights['node_gru'](acts, h)[1]                                                    # [b*v, h]
             last_h = tf.reshape(h, [-1, v, h_dim])
         return last_h
 
     def gated_regression(self, last_h, regression_gate, regression_transform):
         # last_h: [b x v x h]
-        gate_input = tf.concat([last_h, self.placeholders['initial_node_representation']], axis = 2)     # [b x v x 2h]
-        gate_input = tf.reshape(gate_input, [-1, 2 * self.params["hidden_size"]])                        # [(b*v) x 2h]
-        last_h = tf.reshape(last_h, [-1, self.params["hidden_size"]])                                    # [(b*v) x h]
-        gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)        # [(b*v) x 1]
-        gated_outputs = tf.reshape(gated_outputs, [-1, self.placeholders['num_vertices']])               # [b x v]
-        output = tf.reduce_sum(gated_outputs, axis = 1)                                                  # [b]
+        gate_input = tf.concat([last_h, self.placeholders['initial_node_representation']], axis = 2)        # [b, v, 2h]
+        gate_input = tf.reshape(gate_input, [-1, 2 * self.params["hidden_size"]])                           # [b*v, 2h]
+        last_h = tf.reshape(last_h, [-1, self.params["hidden_size"]])                                       # [b*v, h]
+        gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)           # [b*v, 1]
+        gated_outputs = tf.reshape(gated_outputs, [-1, self.placeholders['num_vertices']])                  # [b, v]
+        output = tf.reduce_sum(gated_outputs, axis = 1)                                                     # [b]
         self.output = output
         return output
 
