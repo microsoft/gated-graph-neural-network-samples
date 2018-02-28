@@ -125,7 +125,8 @@ class DenseGGNNChemModel(ChemModel):
         last_h = tf.reshape(last_h, [-1, self.params["hidden_size"]])                                       # [b*v, h]
         gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)           # [b*v, 1]
         gated_outputs = tf.reshape(gated_outputs, [-1, self.placeholders['num_vertices']])                  # [b, v]
-        output = tf.reduce_sum(gated_outputs, axis = 1)                                                     # [b]
+        masked_gated_outputs = gated_outputs * self.placeholders['node_mask']                            # [b x v]
+        output = tf.reduce_sum(masked_gated_outputs, axis = 1)                                                # [b]
         self.output = output
         return output
 
