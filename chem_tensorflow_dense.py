@@ -27,11 +27,11 @@ from utils import glorot_init
 
 
 def graph_to_adj_mat(graph, max_n_vertices, num_edge_types, tie_fwd_bkwd=True):
+    bwd_edge_offset = 0 if tie_fwd_bkwd else (num_edge_types // 2)
     amat = np.zeros((num_edge_types, max_n_vertices, max_n_vertices))
     for src, e, dest in graph:
         amat[e-1, dest, src] = 1
-        offset = 0 if tie_fwd_bkwd else 4
-        amat[e + offset-1, src, dest] = 1
+        amat[e-1 + bwd_edge_offset, src, dest] = 1
     return amat
 
 
