@@ -31,6 +31,9 @@ class ChemModel(object):
             'task_ids': [0],
 
             'random_seed': 0,
+
+            'train_file': 'molecules_train.json',
+            'valid_file': 'molecules_valid.json'
         }
 
     def __init__(self, args):
@@ -68,8 +71,8 @@ class ChemModel(object):
         self.max_num_vertices = 0
         self.num_edge_types = 0
         self.annotation_size = 0
-        self.train_data = self.load_data("molecules_train.json", is_training_data=True)
-        self.valid_data = self.load_data("molecules_valid.json", is_training_data=False)
+        self.train_data = self.load_data(params['train_file'], is_training_data=True)
+        self.valid_data = self.load_data(params['valid_file'], is_training_data=False)
 
         # Build the actual model
         config = tf.ConfigProto()
