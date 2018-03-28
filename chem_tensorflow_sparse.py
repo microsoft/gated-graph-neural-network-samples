@@ -36,8 +36,12 @@ class SparseGGNNChemModel(ChemModel):
             'batch_size': 100000,
             'use_edge_bias': False,
             'use_edge_msg_avg_aggregation': True,
+            'residual_connections': {  # For layer i, specify list of layers whose output is added as an input
+                                     "2": [0],
+                                     "4": [0, 2]
+                                    },
 
-            'layer_timesteps': [1, 1, 1, 1],  # number of layers & propagation steps per layer
+            'layer_timesteps': [2, 2, 1, 2, 1],  # number of layers & propagation steps per layer
 
             'graph_rnn_cell': 'GRU',  # GRU or RNN
             'graph_rnn_activation': 'tanh',  # tanh, ReLU
@@ -90,7 +94,8 @@ class SparseGGNNChemModel(ChemModel):
                 self.weights['rnn_cells'].append(cell)
 
     def compute_final_node_representations(self) -> tf.Tensor:
-        cur_node_states = self.placeholders['initial_node_representation']  # number of nodes in batch v x D
+        node_states_per_layer = []  # one entry per layer (final state of that layer), shape: number of nodes in batch v x D
+        node_states_per_layer.append(self.placeholders['initial_node_representation'])
         num_nodes = tf.shape(self.placeholders['initial_node_representation'], out_type=tf.int64)[0]
 
         for (layer_idx, num_timesteps) in enumerate(self.params['layer_timesteps']):
@@ -105,6 +110,16 @@ class SparseGGNNChemModel(ChemModel):
                                                                      dense_shape=[num_nodes, num_nodes])
                     adjacency_matrices.append(adjacency_matrix_for_edge_type)
 
+                # Extract residual messages, if any
+                layer_residual_connections = self.params['residual_connections'].get(str(layer_idx))
+                if layer_residual_connections is None:
+                    layer_residual_states = []
+                else:
+                    layer_residual_states = [node_states_per_layer[residual_layer_idx]
+                                             for residual_layer_idx in layer_residual_connections]
+
+                # Record new states for this layer. Initialised to last state, but will be updated below:
+                node_states_per_layer.append(node_states_per_layer[-1])
                 for step in range(num_timesteps):
                     with tf.variable_scope('timestep_%i' % step):
                         incoming_messages = []  # list of v x D
@@ -112,7 +127,7 @@ class SparseGGNNChemModel(ChemModel):
                         # Collect incoming messages per edge type
                         for adjacency_matrix in adjacency_matrices:
                             incoming_messages_per_type = tf.sparse_tensor_dense_matmul(adjacency_matrix,
-                                                                                       cur_node_states)  # v x D
+                                                                                       node_states_per_layer[-1])  # v x D
                             incoming_messages.extend([incoming_messages_per_type])
 
                         # Pass incoming messages through linear layer:
@@ -129,10 +144,13 @@ class SparseGGNNChemModel(ChemModel):
                                                                keep_dims=True, axis=-1)  # v x 1
                             messages_passed /= num_incoming_edges + SMALL_NUMBER
 
-                        # pass updated vertex features into RNN cell
-                        cur_node_states = self.weights['rnn_cells'][layer_idx](messages_passed, cur_node_states)[1]  # v x D
+                        incoming_information = tf.concat(layer_residual_states + [messages_passed],
+                                                         axis=-1)  # v x (D * (1 + num of residual connections))
 
-        return cur_node_states
+                        # pass updated vertex features into RNN cell
+                        node_states_per_layer[-1] = self.weights['rnn_cells'][layer_idx](incoming_information, node_states_per_layer[-1])[1]  # v x D
+
+        return node_states_per_layer[-1]
 
     def gated_regression(self, last_h, regression_gate, regression_transform):
         # last_h: [v x h]
