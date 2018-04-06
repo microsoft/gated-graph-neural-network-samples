@@ -35,6 +35,7 @@ class SparseGGNNChemModel(ChemModel):
         params.update({
             'batch_size': 100000,
             'use_edge_bias': False,
+            'use_propagation_attention': False,
             'use_edge_msg_avg_aggregation': True,
             'residual_connections': {  # For layer i, specify list of layers whose output is added as an input
                                      "2": [0],
@@ -72,6 +73,7 @@ class SparseGGNNChemModel(ChemModel):
         # Generate per-layer values for edge weights, biases and gated units. If we tie them, they are just copies:
         self.weights['edge_weights'] = []
         self.weights['edge_biases'] = []
+        self.weights['edge_type_attention_weights'] = []
         self.weights['rnn_cells'] = []
         for layer_idx in range(len(self.params['layer_timesteps'])):
             with tf.variable_scope('gnn_layer_%i' % layer_idx):
@@ -79,6 +81,10 @@ class SparseGGNNChemModel(ChemModel):
                                            name='gnn_edge_weights_%i' % layer_idx)
                 edge_weights = tf.reshape(edge_weights, [self.num_edge_types, h_dim, h_dim])
                 self.weights['edge_weights'].append(edge_weights)
+
+                if self.params['use_propagation_attention']:
+                    self.weights['edge_type_attention_weights'].append(tf.Variable(np.ones([self.num_edge_types], dtype=np.float32),
+                                                                                   name='edge_type_attention_weights_%i' % layer_idx))
 
                 if self.params['use_edge_bias']:
                     self.weights['edge_biases'].append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
@@ -120,20 +126,48 @@ class SparseGGNNChemModel(ChemModel):
                         #   E ~ number of edges of current type
                         #   M ~ number of messages (sum of all E)
                         messages = []  # list of tensors of messages of shape [E, D]
+                        message_source_states = []  # list of tensors of edge source states of shape [E, D]
                         message_targets = []  # list of tensors of message targets of shape [E]
+                        message_edge_types = []  # list of tensors of edge type of shape [E]
 
                         # Collect incoming messages per edge type
-                        for edge_idx, adjacency_list_for_edge_type in enumerate(self.placeholders['adjacency_lists']):
+                        for edge_type_idx, adjacency_list_for_edge_type in enumerate(self.placeholders['adjacency_lists']):
                             edge_sources, edge_targets = adjacency_list_for_edge_type[:, 0], adjacency_list_for_edge_type[:, 1]
-                            input_node_states = tf.nn.embedding_lookup(params=node_states_per_layer[-1],
-                                                                       ids=edge_sources)  # Shape [E, D]
-                            all_messages_for_edge_type = tf.matmul(input_node_states,
-                                                                   self.weights['edge_weights'][layer_idx][edge_idx])  # Shape [E, D]
+                            edge_source_states = tf.nn.embedding_lookup(params=node_states_per_layer[-1],
+                                                                        ids=edge_sources)  # Shape [E, D]
+                            all_messages_for_edge_type = tf.matmul(edge_source_states,
+                                                                   self.weights['edge_weights'][layer_idx][edge_type_idx])  # Shape [E, D]
                             messages.append(all_messages_for_edge_type)
+                            message_source_states.append(edge_source_states)
                             message_targets.append(edge_targets)
+                            message_edge_types.append(tf.ones_like(edge_targets, dtype=tf.int32) * edge_type_idx)
 
                         messages = tf.concat(messages, axis=0)  # Shape [M, D]
                         message_targets = tf.concat(message_targets, axis=0)  # Shape [M]
+
+                        if self.params['use_propagation_attention']:
+                            message_source_states = tf.concat(message_source_states, axis=0)  # Shape [M, D]
+                            message_target_states = tf.nn.embedding_lookup(params=node_states_per_layer[-1],
+                                                                           ids=message_targets)  # Shape [M, D]
+                            message_attention_scores = tf.einsum('mi,mi->m', message_source_states, message_target_states)  # Shape [M]
+
+                            message_edge_types = tf.concat(message_edge_types, axis=0)  # Shape [M]
+                            message_edge_type_factors = tf.nn.embedding_lookup(params=self.weights['edge_type_attention_weights'][layer_idx],
+                                                                               ids=message_edge_types)  # Shape [M]
+
+                            message_attention_scores = message_attention_scores * message_edge_type_factors
+
+                            # The following is softmax-ing over the incoming messages per node.
+                            # As the number of incoming varies, we can't just use tf.softmax:
+                            message_attention_scores_exped = tf.exp(message_attention_scores)  # Shape [M]
+                            message_attention_scores_normalisation_factors = tf.unsorted_segment_sum(data=message_attention_scores_exped,
+                                                                                                     segment_ids=message_targets,
+                                                                                                     num_segments=num_nodes)  # Shape [V]
+                            message_attention_score_per_message = tf.gather(params=message_attention_scores_normalisation_factors,
+                                                                            indices=message_targets)  # Shape [M]
+                            message_attention = message_attention_scores_exped / message_attention_score_per_message  # Shape [M]
+                            messages = messages * tf.expand_dims(message_attention, -1)
+
                         incoming_messages = tf.unsorted_segment_sum(data=messages,
                                                                     segment_ids=message_targets,
                                                                     num_segments=num_nodes)  # Shape [V, D]
