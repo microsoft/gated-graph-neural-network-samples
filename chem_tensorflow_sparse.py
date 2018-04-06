@@ -15,7 +15,7 @@ Options:
 from typing import List, Tuple, Dict, Sequence, Any
 
 from docopt import docopt
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import numpy as np
 import tensorflow as tf
 import sys, traceback
@@ -23,6 +23,12 @@ import pdb
 
 from chem_tensorflow import ChemModel
 from utils import glorot_init, SMALL_NUMBER
+
+
+GGNNWeights = namedtuple('GGNNWeights', ['edge_weights',
+                                         'edge_biases',
+                                         'edge_type_attention_weights',
+                                         'rnn_cells',])
 
 
 class SparseGGNNChemModel(ChemModel):
@@ -71,24 +77,22 @@ class SparseGGNNChemModel(ChemModel):
             raise Exception("Unknown activation function type '%s'." % activation_name)
 
         # Generate per-layer values for edge weights, biases and gated units. If we tie them, they are just copies:
-        self.weights['edge_weights'] = []
-        self.weights['edge_biases'] = []
-        self.weights['edge_type_attention_weights'] = []
-        self.weights['rnn_cells'] = []
+        self.weights = {}  # Used by super-class to place generic things
+        self.gnn_weights = GGNNWeights([], [], [], [])
         for layer_idx in range(len(self.params['layer_timesteps'])):
             with tf.variable_scope('gnn_layer_%i' % layer_idx):
                 edge_weights = tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
                                            name='gnn_edge_weights_%i' % layer_idx)
                 edge_weights = tf.reshape(edge_weights, [self.num_edge_types, h_dim, h_dim])
-                self.weights['edge_weights'].append(edge_weights)
+                self.gnn_weights.edge_weights.append(edge_weights)
 
                 if self.params['use_propagation_attention']:
-                    self.weights['edge_type_attention_weights'].append(tf.Variable(np.ones([self.num_edge_types], dtype=np.float32),
-                                                                                   name='edge_type_attention_weights_%i' % layer_idx))
+                    self.gnn_weights.edge_type_attention_weights.append(tf.Variable(np.ones([self.num_edge_types], dtype=np.float32),
+                                                                                    name='edge_type_attention_weights_%i' % layer_idx))
 
                 if self.params['use_edge_bias']:
-                    self.weights['edge_biases'].append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
-                                                                   name='gnn_edge_biases_%i' % layer_idx))
+                    self.gnn_weights.edge_biases.append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
+                                                                    name='gnn_edge_biases_%i' % layer_idx))
 
                 cell_type = self.params['graph_rnn_cell'].lower()
                 if cell_type == 'gru':
@@ -99,7 +103,7 @@ class SparseGGNNChemModel(ChemModel):
                     raise Exception("Unknown RNN cell type '%s'." % cell_type)
                 cell = tf.nn.rnn_cell.DropoutWrapper(cell,
                                                      state_keep_prob=self.placeholders['graph_state_keep_prob'])
-                self.weights['rnn_cells'].append(cell)
+                self.gnn_weights.rnn_cells.append(cell)
 
     def compute_final_node_representations(self) -> tf.Tensor:
         node_states_per_layer = []  # one entry per layer (final state of that layer), shape: number of nodes in batch v x D
@@ -136,7 +140,7 @@ class SparseGGNNChemModel(ChemModel):
                             edge_source_states = tf.nn.embedding_lookup(params=node_states_per_layer[-1],
                                                                         ids=edge_sources)  # Shape [E, D]
                             all_messages_for_edge_type = tf.matmul(edge_source_states,
-                                                                   self.weights['edge_weights'][layer_idx][edge_type_idx])  # Shape [E, D]
+                                                                   self.gnn_weights.edge_weights[layer_idx][edge_type_idx])  # Shape [E, D]
                             messages.append(all_messages_for_edge_type)
                             message_source_states.append(edge_source_states)
                             message_targets.append(edge_targets)
@@ -152,7 +156,7 @@ class SparseGGNNChemModel(ChemModel):
                             message_attention_scores = tf.einsum('mi,mi->m', message_source_states, message_target_states)  # Shape [M]
 
                             message_edge_types = tf.concat(message_edge_types, axis=0)  # Shape [M]
-                            message_edge_type_factors = tf.nn.embedding_lookup(params=self.weights['edge_type_attention_weights'][layer_idx],
+                            message_edge_type_factors = tf.nn.embedding_lookup(params=self.gnn_weights.edge_type_attention_weights[layer_idx],
                                                                                ids=message_edge_types)  # Shape [M]
 
                             message_attention_scores = message_attention_scores * message_edge_type_factors
@@ -174,7 +178,7 @@ class SparseGGNNChemModel(ChemModel):
 
                         if self.params['use_edge_bias']:
                             incoming_messages += tf.matmul(self.placeholders['num_incoming_edges_per_type'],
-                                                           self.weights['edge_biases'][layer_idx])  # Shape [V, D]
+                                                           self.gnn_weights.edge_biases[layer_idx])  # Shape [V, D]
 
                         if self.params['use_edge_msg_avg_aggregation']:
                             num_incoming_edges = tf.reduce_sum(self.placeholders['num_incoming_edges_per_type'],
@@ -185,8 +189,8 @@ class SparseGGNNChemModel(ChemModel):
                                                          axis=-1)  # Shape [V, D*(1 + num of residual connections)]
 
                         # pass updated vertex features into RNN cell
-                        node_states_per_layer[-1] = self.weights['rnn_cells'][layer_idx](incoming_information,
-                                                                                         node_states_per_layer[-1])[1]  # Shape [V, D]
+                        node_states_per_layer[-1] = self.gnn_weights.rnn_cells[layer_idx](incoming_information,
+                                                                                          node_states_per_layer[-1])[1]  # Shape [V, D]
 
         return node_states_per_layer[-1]
 
