@@ -15,7 +15,7 @@ Options:
 from typing import List, Tuple, Dict, Sequence, Any
 
 from docopt import docopt
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import numpy as np
 import tensorflow as tf
 import sys, traceback
@@ -23,6 +23,12 @@ import pdb
 
 from chem_tensorflow import ChemModel
 from utils import glorot_init, SMALL_NUMBER
+
+
+GGNNWeights = namedtuple('GGNNWeights', ['edge_weights',
+                                         'edge_biases',
+                                         'edge_type_attention_weights',
+                                         'rnn_cells',])
 
 
 class SparseGGNNChemModel(ChemModel):
@@ -35,6 +41,7 @@ class SparseGGNNChemModel(ChemModel):
         params.update({
             'batch_size': 100000,
             'use_edge_bias': False,
+            'use_propagation_attention': False,
             'use_edge_msg_avg_aggregation': True,
             'residual_connections': {  # For layer i, specify list of layers whose output is added as an input
                                      "2": [0],
@@ -54,7 +61,7 @@ class SparseGGNNChemModel(ChemModel):
         h_dim = self.params['hidden_size']
         self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32, [None, h_dim],
                                                                           name='node_features')
-        self.placeholders['adjacency_lists'] = [tf.placeholder(tf.int64, [None, 2], name='adjacency_e%s' % e)
+        self.placeholders['adjacency_lists'] = [tf.placeholder(tf.int32, [None, 2], name='adjacency_e%s' % e)
                                                 for e in range(self.num_edge_types)]
         self.placeholders['num_incoming_edges_per_type'] = tf.placeholder(tf.float32, [None, self.num_edge_types],
                                                                           name='num_incoming_edges_per_type')
@@ -70,17 +77,22 @@ class SparseGGNNChemModel(ChemModel):
             raise Exception("Unknown activation function type '%s'." % activation_name)
 
         # Generate per-layer values for edge weights, biases and gated units. If we tie them, they are just copies:
-        self.weights['edge_weights'] = []
-        self.weights['edge_biases'] = []
-        self.weights['rnn_cells'] = []
+        self.weights = {}  # Used by super-class to place generic things
+        self.gnn_weights = GGNNWeights([], [], [], [])
         for layer_idx in range(len(self.params['layer_timesteps'])):
             with tf.variable_scope('gnn_layer_%i' % layer_idx):
-                self.weights['edge_weights'].append(tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
-                                                                name='gnn_edge_weights_%i' % layer_idx))
+                edge_weights = tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
+                                           name='gnn_edge_weights_%i' % layer_idx)
+                edge_weights = tf.reshape(edge_weights, [self.num_edge_types, h_dim, h_dim])
+                self.gnn_weights.edge_weights.append(edge_weights)
+
+                if self.params['use_propagation_attention']:
+                    self.gnn_weights.edge_type_attention_weights.append(tf.Variable(np.ones([self.num_edge_types], dtype=np.float32),
+                                                                                    name='edge_type_attention_weights_%i' % layer_idx))
 
                 if self.params['use_edge_bias']:
-                    self.weights['edge_biases'].append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
-                                                                   name='gnn_edge_biases_%i' % layer_idx))
+                    self.gnn_weights.edge_biases.append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
+                                                                    name='gnn_edge_biases_%i' % layer_idx))
 
                 cell_type = self.params['graph_rnn_cell'].lower()
                 if cell_type == 'gru':
@@ -91,26 +103,31 @@ class SparseGGNNChemModel(ChemModel):
                     raise Exception("Unknown RNN cell type '%s'." % cell_type)
                 cell = tf.nn.rnn_cell.DropoutWrapper(cell,
                                                      state_keep_prob=self.placeholders['graph_state_keep_prob'])
-                self.weights['rnn_cells'].append(cell)
+                self.gnn_weights.rnn_cells.append(cell)
 
     def compute_final_node_representations(self) -> tf.Tensor:
         node_states_per_layer = []  # one entry per layer (final state of that layer), shape: number of nodes in batch v x D
         node_states_per_layer.append(self.placeholders['initial_node_representation'])
-        num_nodes = tf.shape(self.placeholders['initial_node_representation'], out_type=tf.int64)[0]
+        num_nodes = tf.shape(self.placeholders['initial_node_representation'], out_type=tf.int32)[0]
+
+        message_targets = []  # list of tensors of message targets of shape [E]
+        message_edge_types = []  # list of tensors of edge type of shape [E]
+        for edge_type_idx, adjacency_list_for_edge_type in enumerate(self.placeholders['adjacency_lists']):
+            edge_targets = adjacency_list_for_edge_type[:, 1]
+            message_targets.append(edge_targets)
+            message_edge_types.append(tf.ones_like(edge_targets, dtype=tf.int32) * edge_type_idx)
+        message_targets = tf.concat(message_targets, axis=0)  # Shape [M]
+        message_edge_types = tf.concat(message_edge_types, axis=0)  # Shape [M]
 
         for (layer_idx, num_timesteps) in enumerate(self.params['layer_timesteps']):
             with tf.variable_scope('gnn_layer_%i' % layer_idx):
-                adjacency_matrices = []  # type: List[tf.SparseTensor]
-                for adjacency_list_for_edge_type in self.placeholders['adjacency_lists']:
-                    # adjacency_list_for_edge_type (shape [-1, 2]) includes all edges of type e_type of a sparse graph with v nodes (ids from 0 to v).
-                    adjacency_matrix_for_edge_type = tf.SparseTensor(indices=adjacency_list_for_edge_type,
-                                                                     values=tf.ones_like(
-                                                                         adjacency_list_for_edge_type[:, 1],
-                                                                         dtype=tf.float32),
-                                                                     dense_shape=[num_nodes, num_nodes])
-                    adjacency_matrices.append(adjacency_matrix_for_edge_type)
+                # Used shape abbreviations:
+                #   V ~ number of nodes
+                #   D ~ state dimension
+                #   E ~ number of edges of current type
+                #   M ~ number of messages (sum of all E)
 
-                # Extract residual messages, if any
+                # Extract residual messages, if any:
                 layer_residual_connections = self.params['residual_connections'].get(str(layer_idx))
                 if layer_residual_connections is None:
                     layer_residual_states = []
@@ -118,37 +135,66 @@ class SparseGGNNChemModel(ChemModel):
                     layer_residual_states = [node_states_per_layer[residual_layer_idx]
                                              for residual_layer_idx in layer_residual_connections]
 
+                if self.params['use_propagation_attention']:
+                    message_edge_type_factors = tf.nn.embedding_lookup(params=self.gnn_weights.edge_type_attention_weights[layer_idx],
+                                                                       ids=message_edge_types)  # Shape [M]
+
                 # Record new states for this layer. Initialised to last state, but will be updated below:
                 node_states_per_layer.append(node_states_per_layer[-1])
                 for step in range(num_timesteps):
                     with tf.variable_scope('timestep_%i' % step):
-                        incoming_messages = []  # list of v x D
+                        messages = []  # list of tensors of messages of shape [E, D]
+                        message_source_states = []  # list of tensors of edge source states of shape [E, D]
 
                         # Collect incoming messages per edge type
-                        for adjacency_matrix in adjacency_matrices:
-                            incoming_messages_per_type = tf.sparse_tensor_dense_matmul(adjacency_matrix,
-                                                                                       node_states_per_layer[-1])  # v x D
-                            incoming_messages.extend([incoming_messages_per_type])
+                        for edge_type_idx, adjacency_list_for_edge_type in enumerate(self.placeholders['adjacency_lists']):
+                            edge_sources = adjacency_list_for_edge_type[:, 0]
+                            edge_source_states = tf.nn.embedding_lookup(params=node_states_per_layer[-1],
+                                                                        ids=edge_sources)  # Shape [E, D]
+                            all_messages_for_edge_type = tf.matmul(edge_source_states,
+                                                                   self.gnn_weights.edge_weights[layer_idx][edge_type_idx])  # Shape [E, D]
+                            messages.append(all_messages_for_edge_type)
+                            message_source_states.append(edge_source_states)
 
-                        # Pass incoming messages through linear layer:
-                        incoming_messages = tf.concat(incoming_messages, axis=1)  # v x [2 *] edge_types
-                        messages_passed = tf.matmul(incoming_messages,
-                                                    self.weights['edge_weights'][layer_idx])  # v x D
+                        messages = tf.concat(messages, axis=0)  # Shape [M, D]
+
+                        if self.params['use_propagation_attention']:
+                            message_source_states = tf.concat(message_source_states, axis=0)  # Shape [M, D]
+                            message_target_states = tf.nn.embedding_lookup(params=node_states_per_layer[-1],
+                                                                           ids=message_targets)  # Shape [M, D]
+                            message_attention_scores = tf.einsum('mi,mi->m', message_source_states, message_target_states)  # Shape [M]
+                            message_attention_scores = message_attention_scores * message_edge_type_factors
+
+                            # The following is softmax-ing over the incoming messages per node.
+                            # As the number of incoming varies, we can't just use tf.softmax:
+                            message_attention_scores_exped = tf.exp(message_attention_scores)  # Shape [M]
+                            message_attention_scores_normalisation_factors = tf.unsorted_segment_sum(data=message_attention_scores_exped,
+                                                                                                     segment_ids=message_targets,
+                                                                                                     num_segments=num_nodes)  # Shape [V]
+                            message_attention_score_per_message = tf.gather(params=message_attention_scores_normalisation_factors,
+                                                                            indices=message_targets)  # Shape [M]
+                            message_attention = message_attention_scores_exped / message_attention_score_per_message  # Shape [M]
+                            messages = messages * tf.expand_dims(message_attention, -1)
+
+                        incoming_messages = tf.unsorted_segment_sum(data=messages,
+                                                                    segment_ids=message_targets,
+                                                                    num_segments=num_nodes)  # Shape [V, D]
 
                         if self.params['use_edge_bias']:
-                            messages_passed += tf.matmul(self.placeholders['num_incoming_edges_per_type'],
-                                                         self.weights['edge_biases'][layer_idx])  # v x D
+                            incoming_messages += tf.matmul(self.placeholders['num_incoming_edges_per_type'],
+                                                           self.gnn_weights.edge_biases[layer_idx])  # Shape [V, D]
 
                         if self.params['use_edge_msg_avg_aggregation']:
                             num_incoming_edges = tf.reduce_sum(self.placeholders['num_incoming_edges_per_type'],
-                                                               keep_dims=True, axis=-1)  # v x 1
-                            messages_passed /= num_incoming_edges + SMALL_NUMBER
+                                                               keep_dims=True, axis=-1)  # Shape [V, 1]
+                            incoming_messages /= num_incoming_edges + SMALL_NUMBER
 
-                        incoming_information = tf.concat(layer_residual_states + [messages_passed],
-                                                         axis=-1)  # v x (D * (1 + num of residual connections))
+                        incoming_information = tf.concat(layer_residual_states + [incoming_messages],
+                                                         axis=-1)  # Shape [V, D*(1 + num of residual connections)]
 
                         # pass updated vertex features into RNN cell
-                        node_states_per_layer[-1] = self.weights['rnn_cells'][layer_idx](incoming_information, node_states_per_layer[-1])[1]  # v x D
+                        node_states_per_layer[-1] = self.gnn_weights.rnn_cells[layer_idx](incoming_information,
+                                                                                          node_states_per_layer[-1])[1]  # Shape [V, D]
 
         return node_states_per_layer[-1]
 
