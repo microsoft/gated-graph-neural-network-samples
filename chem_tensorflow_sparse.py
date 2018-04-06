@@ -54,7 +54,7 @@ class SparseGGNNChemModel(ChemModel):
         h_dim = self.params['hidden_size']
         self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32, [None, h_dim],
                                                                           name='node_features')
-        self.placeholders['adjacency_lists'] = [tf.placeholder(tf.int64, [None, 2], name='adjacency_e%s' % e)
+        self.placeholders['adjacency_lists'] = [tf.placeholder(tf.int32, [None, 2], name='adjacency_e%s' % e)
                                                 for e in range(self.num_edge_types)]
         self.placeholders['num_incoming_edges_per_type'] = tf.placeholder(tf.float32, [None, self.num_edge_types],
                                                                           name='num_incoming_edges_per_type')
@@ -75,8 +75,10 @@ class SparseGGNNChemModel(ChemModel):
         self.weights['rnn_cells'] = []
         for layer_idx in range(len(self.params['layer_timesteps'])):
             with tf.variable_scope('gnn_layer_%i' % layer_idx):
-                self.weights['edge_weights'].append(tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
-                                                                name='gnn_edge_weights_%i' % layer_idx))
+                edge_weights = tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
+                                           name='gnn_edge_weights_%i' % layer_idx)
+                edge_weights = tf.reshape(edge_weights, [self.num_edge_types, h_dim, h_dim])
+                self.weights['edge_weights'].append(edge_weights)
 
                 if self.params['use_edge_bias']:
                     self.weights['edge_biases'].append(tf.Variable(np.zeros([self.num_edge_types, h_dim], dtype=np.float32),
@@ -96,21 +98,11 @@ class SparseGGNNChemModel(ChemModel):
     def compute_final_node_representations(self) -> tf.Tensor:
         node_states_per_layer = []  # one entry per layer (final state of that layer), shape: number of nodes in batch v x D
         node_states_per_layer.append(self.placeholders['initial_node_representation'])
-        num_nodes = tf.shape(self.placeholders['initial_node_representation'], out_type=tf.int64)[0]
+        num_nodes = tf.shape(self.placeholders['initial_node_representation'], out_type=tf.int32)[0]
 
         for (layer_idx, num_timesteps) in enumerate(self.params['layer_timesteps']):
             with tf.variable_scope('gnn_layer_%i' % layer_idx):
-                adjacency_matrices = []  # type: List[tf.SparseTensor]
-                for adjacency_list_for_edge_type in self.placeholders['adjacency_lists']:
-                    # adjacency_list_for_edge_type (shape [-1, 2]) includes all edges of type e_type of a sparse graph with v nodes (ids from 0 to v).
-                    adjacency_matrix_for_edge_type = tf.SparseTensor(indices=adjacency_list_for_edge_type,
-                                                                     values=tf.ones_like(
-                                                                         adjacency_list_for_edge_type[:, 1],
-                                                                         dtype=tf.float32),
-                                                                     dense_shape=[num_nodes, num_nodes])
-                    adjacency_matrices.append(adjacency_matrix_for_edge_type)
-
-                # Extract residual messages, if any
+                # Extract residual messages, if any:
                 layer_residual_connections = self.params['residual_connections'].get(str(layer_idx))
                 if layer_residual_connections is None:
                     layer_residual_states = []
@@ -122,33 +114,45 @@ class SparseGGNNChemModel(ChemModel):
                 node_states_per_layer.append(node_states_per_layer[-1])
                 for step in range(num_timesteps):
                     with tf.variable_scope('timestep_%i' % step):
-                        incoming_messages = []  # list of v x D
+                        # Used shape abbreviations:
+                        #   V ~ number of nodes
+                        #   D ~ state dimension
+                        #   E ~ number of edges of current type
+                        #   M ~ number of messages (sum of all E)
+                        messages = []  # list of tensors of messages of shape [E, D]
+                        message_targets = []  # list of tensors of message targets of shape [E]
 
                         # Collect incoming messages per edge type
-                        for adjacency_matrix in adjacency_matrices:
-                            incoming_messages_per_type = tf.sparse_tensor_dense_matmul(adjacency_matrix,
-                                                                                       node_states_per_layer[-1])  # v x D
-                            incoming_messages.extend([incoming_messages_per_type])
+                        for edge_idx, adjacency_list_for_edge_type in enumerate(self.placeholders['adjacency_lists']):
+                            edge_sources, edge_targets = adjacency_list_for_edge_type[:, 0], adjacency_list_for_edge_type[:, 1]
+                            input_node_states = tf.nn.embedding_lookup(params=node_states_per_layer[-1],
+                                                                       ids=edge_sources)  # Shape [E, D]
+                            all_messages_for_edge_type = tf.matmul(input_node_states,
+                                                                   self.weights['edge_weights'][layer_idx][edge_idx])  # Shape [E, D]
+                            messages.append(all_messages_for_edge_type)
+                            message_targets.append(edge_targets)
 
-                        # Pass incoming messages through linear layer:
-                        incoming_messages = tf.concat(incoming_messages, axis=1)  # v x [2 *] edge_types
-                        messages_passed = tf.matmul(incoming_messages,
-                                                    self.weights['edge_weights'][layer_idx])  # v x D
+                        messages = tf.concat(messages, axis=0)  # Shape [M, D]
+                        message_targets = tf.concat(message_targets, axis=0)  # Shape [M]
+                        incoming_messages = tf.unsorted_segment_sum(data=messages,
+                                                                    segment_ids=message_targets,
+                                                                    num_segments=num_nodes)  # Shape [V, D]
 
                         if self.params['use_edge_bias']:
-                            messages_passed += tf.matmul(self.placeholders['num_incoming_edges_per_type'],
-                                                         self.weights['edge_biases'][layer_idx])  # v x D
+                            incoming_messages += tf.matmul(self.placeholders['num_incoming_edges_per_type'],
+                                                           self.weights['edge_biases'][layer_idx])  # Shape [V, D]
 
                         if self.params['use_edge_msg_avg_aggregation']:
                             num_incoming_edges = tf.reduce_sum(self.placeholders['num_incoming_edges_per_type'],
-                                                               keep_dims=True, axis=-1)  # v x 1
-                            messages_passed /= num_incoming_edges + SMALL_NUMBER
+                                                               keep_dims=True, axis=-1)  # Shape [V, 1]
+                            incoming_messages /= num_incoming_edges + SMALL_NUMBER
 
-                        incoming_information = tf.concat(layer_residual_states + [messages_passed],
-                                                         axis=-1)  # v x (D * (1 + num of residual connections))
+                        incoming_information = tf.concat(layer_residual_states + [incoming_messages],
+                                                         axis=-1)  # Shape [V, D*(1 + num of residual connections)]
 
                         # pass updated vertex features into RNN cell
-                        node_states_per_layer[-1] = self.weights['rnn_cells'][layer_idx](incoming_information, node_states_per_layer[-1])[1]  # v x D
+                        node_states_per_layer[-1] = self.weights['rnn_cells'][layer_idx](incoming_information,
+                                                                                         node_states_per_layer[-1])[1]  # Shape [V, D]
 
         return node_states_per_layer[-1]
 
