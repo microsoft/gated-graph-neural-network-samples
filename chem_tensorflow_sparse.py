@@ -166,14 +166,24 @@ class SparseGGNNChemModel(ChemModel):
                             message_attention_scores = message_attention_scores * message_edge_type_factors
 
                             # The following is softmax-ing over the incoming messages per node.
-                            # As the number of incoming varies, we can't just use tf.softmax:
+                            # As the number of incoming varies, we can't just use tf.softmax. Reimplement with logsumexp trick:
+                            # Step (1): Obtain shift constant as max of messages going into a node
+                            message_attention_score_max_per_target = tf.unsorted_segment_max(data=message_attention_scores,
+                                                                                             segment_ids=message_targets,
+                                                                                             num_segments=num_nodes)  # Shape [V]
+                            # Step (2): Distribute max out to the corresponding messages again, and shift scores:
+                            message_attention_score_max_per_message = tf.gather(params=message_attention_score_max_per_target,
+                                                                                indices=message_targets)  # Shape [M]
+                            message_attention_scores -= message_attention_score_max_per_message
+                            # Step (3): Exp, sum up per target, compute exp(score) / exp(sum) as attention prob:
                             message_attention_scores_exped = tf.exp(message_attention_scores)  # Shape [M]
-                            message_attention_scores_normalisation_factors = tf.unsorted_segment_sum(data=message_attention_scores_exped,
-                                                                                                     segment_ids=message_targets,
-                                                                                                     num_segments=num_nodes)  # Shape [V]
-                            message_attention_score_per_message = tf.gather(params=message_attention_scores_normalisation_factors,
-                                                                            indices=message_targets)  # Shape [M]
-                            message_attention = message_attention_scores_exped / message_attention_score_per_message  # Shape [M]
+                            message_attention_score_sum_per_target = tf.unsorted_segment_sum(data=message_attention_scores_exped,
+                                                                                             segment_ids=message_targets,
+                                                                                             num_segments=num_nodes)  # Shape [V]
+                            message_attention_normalisation_sum_per_message = tf.gather(params=message_attention_score_sum_per_target,
+                                                                                        indices=message_targets)  # Shape [M]
+                            message_attention = message_attention_scores_exped / (message_attention_normalisation_sum_per_message + SMALL_NUMBER)  # Shape [M]
+                            # Step (4): Weigh messages using the attention prob:
                             messages = messages * tf.expand_dims(message_attention, -1)
 
                         incoming_messages = tf.unsorted_segment_sum(data=messages,
