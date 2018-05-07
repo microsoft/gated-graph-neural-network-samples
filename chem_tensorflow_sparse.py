@@ -76,7 +76,7 @@ class SparseGGNNChemModel(ChemModel):
         else:
             raise Exception("Unknown activation function type '%s'." % activation_name)
 
-        # Generate per-layer values for edge weights, biases and gated units. If we tie them, they are just copies:
+        # Generate per-layer values for edge weights, biases and gated units:
         self.weights = {}  # Used by super-class to place generic things
         self.gnn_weights = GGNNWeights([], [], [], [])
         for layer_idx in range(len(self.params['layer_timesteps'])):

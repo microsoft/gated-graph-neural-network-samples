@@ -45,7 +45,7 @@ python3 ./chem_tensorflow_gcn.py
 Finally, it turns out that the extension of GCN to different edge types is a variant of GGNN, and you can run
 GCN (as in [Schlichtkrull et al. 2017](https://arxiv.org/abs/1703.06103)) by calling
 ```
-python3 ./chem_tensorflow_sparse.py --config '{"use_edge_bias": false, "use_edge_msg_avg_aggregation": true, "tie_gnn_layers": false, "graph_rnn_cell": "RNN", "graph_rnn_activation": "ReLU"}'
+python3 ./chem_tensorflow_sparse.py --config '{"use_edge_bias": false, "use_edge_msg_avg_aggregation": true, "residual_connections": {}, "layer_timesteps": [1,1,1,1,1,1,1,1], "graph_rnn_cell": "RNN", "graph_rnn_activation": "ReLU"}'
 ```
 
 To run asynchronous Gated Graph Neural Networks, use
