@@ -60,6 +60,7 @@ class DenseGGNNChemModel(ChemModel):
                         'graph_state_dropout_keep_prob': 1.,
                         'task_sample_ratios': {},
                         'use_edge_bias': True,
+                        'edge_weight_dropout_keep_prob': 1
                       })
         return params
 
@@ -67,6 +68,7 @@ class DenseGGNNChemModel(ChemModel):
         h_dim = self.params['hidden_size']
         # inputs
         self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
+        self.placeholders['edge_weight_dropout_keep_prob'] = tf.placeholder(tf.float32, None, name='edge_weight_dropout_keep_prob')
         self.placeholders['initial_node_representation'] = tf.placeholder(tf.float32,
                                                                           [None, None, self.params['hidden_size']],
                                                                           name='node_features')
@@ -104,7 +106,8 @@ class DenseGGNNChemModel(ChemModel):
                 if i > 0:
                     tf.get_variable_scope().reuse_variables()
                 for edge_type in range(self.num_edge_types):
-                    m = tf.matmul(h, self.weights['edge_weights'][edge_type])                               # [b*v, h]
+                    m = tf.matmul(h, tf.nn.dropout(self.weights['edge_weights'][edge_type],
+                                                   keep_prob=self.placeholders['edge_weight_dropout_keep_prob'])) # [b*v, h]
                     if self.params['use_edge_bias']:
                         m += biases[edge_type]                                                              # [b*v, h]
                     m = tf.reshape(m, [-1, v, h_dim])                                                       # [b, v, h]
@@ -222,6 +225,7 @@ class DenseGGNNChemModel(ChemModel):
                 self.placeholders['adjacency_matrix']: batch_data['adj_mat'],
                 self.placeholders['node_mask']: batch_data['node_mask'],
                 self.placeholders['graph_state_keep_prob']: dropout_keep_prob,
+                self.placeholders['edge_weight_dropout_keep_prob']: dropout_keep_prob
             }
 
             bucket_counters[bucket] += 1
@@ -242,6 +246,7 @@ class DenseGGNNChemModel(ChemModel):
             self.placeholders['node_mask']: node_masks,
             self.placeholders['graph_state_keep_prob']: 1.0,
             self.placeholders['out_layer_dropout_keep_prob']: 1.0,
+            self.placeholders['edge_weight_dropout_keep_prob']: 1.0
         }
 
         fetch_list = self.output
