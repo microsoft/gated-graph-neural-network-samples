@@ -50,7 +50,7 @@ class SparseGGNNChemModel(ChemModel):
 
             'layer_timesteps': [2, 2, 1, 2, 1],  # number of layers & propagation steps per layer
 
-            'graph_rnn_cell': 'GRU',  # GRU or RNN
+            'graph_rnn_cell': 'GRU',  # GRU, CudnnCompatibleGRUCell, or RNN
             'graph_rnn_activation': 'tanh',  # tanh, ReLU
             'graph_state_dropout_keep_prob': 1.,
             'task_sample_ratios': {},
@@ -97,6 +97,10 @@ class SparseGGNNChemModel(ChemModel):
                 cell_type = self.params['graph_rnn_cell'].lower()
                 if cell_type == 'gru':
                     cell = tf.nn.rnn_cell.GRUCell(h_dim, activation=activation_fun)
+                elif cell_type == 'cudnncompatiblegrucell':
+                    assert(activation_name == 'tanh')
+                    import tensorflow.contrib.cudnn_rnn as cudnn_rnn
+                    cell = cudnn_rnn.CudnnCompatibleGRUCell(h_dim)
                 elif cell_type == 'rnn':
                     cell = tf.nn.rnn_cell.BasicRNNCell(h_dim, activation=activation_fun)
                 else:
