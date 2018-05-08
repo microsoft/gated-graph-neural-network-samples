@@ -33,7 +33,10 @@ class SparseGCNChemModel(ChemModel):
     def default_params(cls):
         params = dict(super().default_params())
         params.update({'batch_size': 100000,
-                       'gcn_use_bias': False})
+                       'task_sample_ratios': {},
+                       'gcn_use_bias': False,
+                       'graph_state_dropout_keep_prob': 1.0,
+                       })
         return params
 
     def prepare_specific_graph_model(self) -> None:
@@ -42,7 +45,8 @@ class SparseGCNChemModel(ChemModel):
                                                                           name='node_features')
         self.placeholders['adjacency_list'] = tf.placeholder(tf.int64, [None, 2], name='adjacency_list')
         self.placeholders['adjacency_weights'] = tf.placeholder(tf.float32, [None], name='adjacency_weights')
-        self.placeholders['graph_nodes_list'] = tf.placeholder(tf.int64, [None, 2], name='graph_nodes_list')
+        self.placeholders['graph_nodes_list'] = tf.placeholder(tf.int32, [None], name='graph_nodes_list')
+        self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
 
         with tf.variable_scope('gcn_scope'):
             self.weights['edge_weights'] = [tf.Variable(glorot_init((h_dim, h_dim)), name="gcn_weights_%i" % i)
@@ -71,7 +75,7 @@ class SparseGCNChemModel(ChemModel):
                 # On all but final layer do ReLU and dropout:
                 if layer_idx < self.params['num_timesteps'] - 1:
                     new_node_states = tf.nn.relu(new_node_states)
-                    new_node_states = tf.nn.dropout(new_node_states, keep_prob=self.placeholders['dropout_keep_prob'])
+                    new_node_states = tf.nn.dropout(new_node_states, keep_prob=self.placeholders['graph_state_keep_prob'])
 
                 cur_node_states = new_node_states
 
@@ -80,15 +84,13 @@ class SparseGCNChemModel(ChemModel):
     def gated_regression(self, last_h, regression_gate, regression_transform):
         # last_h: [v x h]
         gate_input = tf.concat([last_h, self.placeholders['initial_node_representation']], axis=-1)  # [v x 2h]
-        gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)    # [(b*v) x 1]
+        gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)    # [v x 1]
 
         # Sum up all nodes per-graph
-        num_nodes = tf.shape(gate_input, out_type=tf.int64)[0]
-        graph_nodes = tf.SparseTensor(indices=self.placeholders['graph_nodes_list'],
-                                      values=tf.ones_like(self.placeholders['graph_nodes_list'][:, 0],
-                                                          dtype=tf.float32),
-                                      dense_shape=[self.placeholders['num_graphs'], num_nodes])  # [g x v]
-        return tf.squeeze(tf.sparse_tensor_dense_matmul(graph_nodes, gated_outputs), axis=[-1])  # [g]
+        graph_representations = tf.unsorted_segment_sum(data=gated_outputs,
+                                                        segment_ids=self.placeholders['graph_nodes_list'],
+                                                        num_segments=self.placeholders['num_graphs'])  # [g x 1]
+        return tf.squeeze(graph_representations)  # [g]
 
     # ----- Data preprocessing and chunking into minibatches:
     def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool) -> Any:
@@ -144,6 +146,7 @@ class SparseGCNChemModel(ChemModel):
         multiple disconnected components."""
         if is_training:
             np.random.shuffle(data)
+        dropout_keep_prob = self.params['graph_state_dropout_keep_prob'] if is_training else 1.
         # Pack until we cannot fit more graphs in the batch
         num_graphs = 0
         while num_graphs < len(data):
@@ -163,7 +166,7 @@ class SparseGCNChemModel(ChemModel):
                                          ((0, 0), (0, self.params['hidden_size'] - self.annotation_size)),
                                          mode='constant')
                 batch_node_features.extend(padded_features)
-                batch_graph_nodes_list.extend((num_graphs_in_batch, node_offset + i) for i in range(num_nodes_in_graph))
+                batch_graph_nodes_list.append(np.full(shape=[num_nodes_in_graph], fill_value=num_graphs_in_batch, dtype=np.int32))
                 batch_adjacency_list.append(cur_graph['adjacency_list'] + node_offset)
                 batch_adjacency_weights.append(cur_graph['adjacency_weights'])
 
@@ -186,10 +189,11 @@ class SparseGCNChemModel(ChemModel):
                 self.placeholders['initial_node_representation']: np.array(batch_node_features),
                 self.placeholders['adjacency_list']: np.concatenate(batch_adjacency_list, axis=0),
                 self.placeholders['adjacency_weights']: np.concatenate(batch_adjacency_weights, axis=0),
-                self.placeholders['graph_nodes_list']: np.array(batch_graph_nodes_list, dtype=np.int32),
+                self.placeholders['graph_nodes_list']: np.concatenate(batch_graph_nodes_list, axis=0),
                 self.placeholders['target_values']: np.transpose(batch_target_task_values, axes=[1,0]),
                 self.placeholders['target_mask']: np.transpose(batch_target_task_mask, axes=[1, 0]),
                 self.placeholders['num_graphs']: num_graphs_in_batch,
+                self.placeholders['graph_state_keep_prob']: dropout_keep_prob,
             }
 
             yield batch_feed_dict

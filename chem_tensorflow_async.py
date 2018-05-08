@@ -98,7 +98,7 @@ class AsyncGGNNChemModel(ChemModel):
                                                                   name="receiving_nodes_num_round%i" % (prop_round,))
                                                    for prop_round in range(self.params['propagation_rounds'])]
 
-        self.placeholders['graph_nodes_list'] = tf.placeholder(tf.int64, [None, 2], name='graph_nodes_list')
+        self.placeholders['graph_nodes_list'] = tf.placeholder(tf.int32, [None], name='graph_nodes_list')
         self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
 
         activation_name = self.params['graph_rnn_activation'].lower()
@@ -222,13 +222,11 @@ class AsyncGGNNChemModel(ChemModel):
         gate_input = tf.concat([last_h, self.placeholders['initial_node_representation']], axis=-1)  # [v x 2h]
         gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)  # [v x 1]
 
-        # Sum up all nodes per-graph
-        num_nodes = tf.shape(gate_input, out_type=tf.int64)[0]
-        graph_nodes = tf.SparseTensor(indices=self.placeholders['graph_nodes_list'],
-                                      values=tf.ones_like(self.placeholders['graph_nodes_list'][:, 0],
-                                                          dtype=tf.float32),
-                                      dense_shape=[self.placeholders['num_graphs'], num_nodes])  # [g x v]
-        return tf.squeeze(tf.sparse_tensor_dense_matmul(graph_nodes, gated_outputs), axis=[-1])  # [g]
+        # Sum up all nodes per graph
+        graph_representations = tf.unsorted_segment_sum(data=gated_outputs,
+                                                        segment_ids=self.placeholders['graph_nodes_list'],
+                                                        num_segments=self.placeholders['num_graphs'])  # [g x 1]
+        return tf.squeeze(graph_representations)  # [g]
 
     # ----- Data preprocessing and chunking into minibatches:
     def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool) -> Any:
@@ -381,8 +379,7 @@ class AsyncGGNNChemModel(ChemModel):
                                          ((0, 0), (0, self.params['hidden_size'] - self.annotation_size)),
                                          'constant')
                 batch_node_features.extend(padded_features)
-                batch_graph_nodes_list.extend(
-                    (num_graphs_in_batch, node_offset + i) for i in range(num_nodes_in_graph))
+                batch_graph_nodes_list.append(np.full(shape=[num_nodes_in_graph], fill_value=num_graphs_in_batch, dtype=np.int32))
 
                 # Combine the different propagation schedules:
                 for prop_round in range(self.params['propagation_rounds']):
@@ -422,7 +419,7 @@ class AsyncGGNNChemModel(ChemModel):
 
             batch_feed_dict = {
                 self.placeholders['initial_node_representation']: np.array(batch_node_features),
-                self.placeholders['graph_nodes_list']: np.array(batch_graph_nodes_list, dtype=np.int32),
+                self.placeholders['graph_nodes_list']: np.concatenate(batch_graph_nodes_list, axis=0),
                 self.placeholders['target_values']: np.transpose(batch_target_task_values, axes=[1,0]),
                 self.placeholders['target_mask']: np.transpose(batch_target_task_mask, axes=[1, 0]),
                 self.placeholders['num_graphs']: num_graphs_in_batch,

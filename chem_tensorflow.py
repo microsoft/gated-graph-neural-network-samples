@@ -128,7 +128,7 @@ class ChemModel(object):
                                                             name='target_values')
         self.placeholders['target_mask'] = tf.placeholder(tf.float32, [len(self.params['task_ids']), None],
                                                           name='target_mask')
-        self.placeholders['num_graphs'] = tf.placeholder(tf.int64, [], name='num_graphs')
+        self.placeholders['num_graphs'] = tf.placeholder(tf.int32, [], name='num_graphs')
         self.placeholders['out_layer_dropout_keep_prob'] = tf.placeholder(tf.float32, [], name='out_layer_dropout_keep_prob')
 
         with tf.variable_scope("graph_model"):
