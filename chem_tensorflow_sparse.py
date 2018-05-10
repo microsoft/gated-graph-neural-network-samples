@@ -54,6 +54,7 @@ class SparseGGNNChemModel(ChemModel):
             'graph_rnn_activation': 'tanh',  # tanh, ReLU
             'graph_state_dropout_keep_prob': 1.,
             'task_sample_ratios': {},
+            'edge_weight_dropout_keep_prob': .8
         })
         return params
 
@@ -67,6 +68,7 @@ class SparseGGNNChemModel(ChemModel):
                                                                           name='num_incoming_edges_per_type')
         self.placeholders['graph_nodes_list'] = tf.placeholder(tf.int32, [None], name='graph_nodes_list')
         self.placeholders['graph_state_keep_prob'] = tf.placeholder(tf.float32, None, name='graph_state_keep_prob')
+        self.placeholders['edge_weight_dropout_keep_prob'] = tf.placeholder(tf.float32, None, name='edge_weight_dropout_keep_prob')
 
         activation_name = self.params['graph_rnn_activation'].lower()
         if activation_name == 'tanh':
@@ -84,6 +86,7 @@ class SparseGGNNChemModel(ChemModel):
                 edge_weights = tf.Variable(glorot_init([self.num_edge_types * h_dim, h_dim]),
                                            name='gnn_edge_weights_%i' % layer_idx)
                 edge_weights = tf.reshape(edge_weights, [self.num_edge_types, h_dim, h_dim])
+                edge_weights = tf.nn.dropout(edge_weights, keep_prob=self.placeholders['edge_weight_dropout_keep_prob'])
                 self.gnn_weights.edge_weights.append(edge_weights)
 
                 if self.params['use_propagation_attention']:
@@ -274,7 +277,8 @@ class SparseGGNNChemModel(ChemModel):
         if is_training:
             np.random.shuffle(data)
         # Pack until we cannot fit more graphs in the batch
-        dropout_keep_prob = self.params['graph_state_dropout_keep_prob'] if is_training else 1.
+        state_dropout_keep_prob = self.params['graph_state_dropout_keep_prob'] if is_training else 1.
+        edge_weights_dropout_keep_prob = self.params['edge_weight_dropout_keep_prob'] if is_training else 1.
         num_graphs = 0
         while num_graphs < len(data):
             num_graphs_in_batch = 0
@@ -327,7 +331,8 @@ class SparseGGNNChemModel(ChemModel):
                 self.placeholders['target_values']: np.transpose(batch_target_task_values, axes=[1,0]),
                 self.placeholders['target_mask']: np.transpose(batch_target_task_mask, axes=[1, 0]),
                 self.placeholders['num_graphs']: num_graphs_in_batch,
-                self.placeholders['graph_state_keep_prob']: dropout_keep_prob,
+                self.placeholders['graph_state_keep_prob']: state_dropout_keep_prob,
+                self.placeholders['edge_weight_dropout_keep_prob']: edge_weights_dropout_keep_prob
             }
 
             # Merge adjacency lists and information about incoming nodes:
