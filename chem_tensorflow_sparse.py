@@ -54,7 +54,7 @@ class SparseGGNNChemModel(ChemModel):
             'graph_rnn_activation': 'tanh',  # tanh, ReLU
             'graph_state_dropout_keep_prob': 1.,
             'task_sample_ratios': {},
-            'edge_weight_dropout_keep_prob': 1.
+            'edge_weight_dropout_keep_prob': .8
         })
         return params
 
