@@ -95,12 +95,6 @@ class DenseGGNNChemModel(ChemModel):
         h = self.placeholders['initial_node_representation']                                                # [b, v, h]
         h = tf.reshape(h, [-1, h_dim])
 
-        # precompute edge biases
-        if self.params['use_edge_bias']:
-            biases = []                                                                                     # e ; t ; [b*v, h]
-            for edge_type,a in enumerate(tf.unstack(self.__adjacency_matrix, axis=0)):
-                summed_a = tf.reshape(tf.reduce_sum(a, axis=-1), [-1, 1])                                   # [b*v, 1]
-                biases.append(tf.matmul(summed_a, self.weights['edge_biases'][edge_type]))                  # [b*v, h]   
         with tf.variable_scope("gru_scope") as scope:
             for i in range(self.params['num_timesteps']):
                 if i > 0:
@@ -108,9 +102,9 @@ class DenseGGNNChemModel(ChemModel):
                 for edge_type in range(self.num_edge_types):
                     m = tf.matmul(h, tf.nn.dropout(self.weights['edge_weights'][edge_type],
                                                    keep_prob=self.placeholders['edge_weight_dropout_keep_prob'])) # [b*v, h]
-                    if self.params['use_edge_bias']:
-                        m += biases[edge_type]                                                              # [b*v, h]
                     m = tf.reshape(m, [-1, v, h_dim])                                                       # [b, v, h]
+                    if self.params['use_edge_bias']:
+                        m += self.weights['edge_biases'][edge_type]                                         # [b, v, h]
                     if edge_type == 0:
                         acts = tf.matmul(self.__adjacency_matrix[edge_type], m)
                     else:
@@ -128,8 +122,8 @@ class DenseGGNNChemModel(ChemModel):
         last_h = tf.reshape(last_h, [-1, self.params["hidden_size"]])                                       # [b*v, h]
         gated_outputs = tf.nn.sigmoid(regression_gate(gate_input)) * regression_transform(last_h)           # [b*v, 1]
         gated_outputs = tf.reshape(gated_outputs, [-1, self.placeholders['num_vertices']])                  # [b, v]
-        masked_gated_outputs = gated_outputs * self.placeholders['node_mask']                            # [b x v]
-        output = tf.reduce_sum(masked_gated_outputs, axis = 1)                                                # [b]
+        masked_gated_outputs = gated_outputs * self.placeholders['node_mask']                               # [b x v]
+        output = tf.reduce_sum(masked_gated_outputs, axis = 1)                                              # [b]
         self.output = output
         return output
 
