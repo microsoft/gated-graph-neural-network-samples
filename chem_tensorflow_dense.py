@@ -11,6 +11,7 @@ Options:
     --data_dir NAME          data dir name
     --restore FILE           File to restore weights from.
     --freeze-graph-model     Freeze weights of graph model components.
+    --evaluate               example evaluation mode using a restored model
 """
 
 from typing import Sequence, Any
@@ -268,8 +269,7 @@ def main():
     try:
         model = DenseGGNNChemModel(args)
 
-        evaluation = False
-        if evaluation:
+        if args['--evaluate']:
             model.example_evaluation()
         else:
             model.train()
