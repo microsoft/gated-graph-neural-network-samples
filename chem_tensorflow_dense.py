@@ -130,6 +130,8 @@ class DenseGGNNChemModel(ChemModel):
 
     # ----- Data preprocessing and chunking into minibatches:
     def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool, bucket_sizes=None) -> Any:
+        #import pdb
+        #pdb.set_trace()
         if bucket_sizes is None:
             bucket_sizes = np.array(list(range(4, 28, 2)) + [29])
         bucketed = defaultdict(list)
@@ -255,6 +257,11 @@ class DenseGGNNChemModel(ChemModel):
         n_example_molecules = 10
         with open('molecules_valid.json', 'r') as valid_file:
             example_molecules = json.load(valid_file)[:n_example_molecules]
+
+        #SAHIL
+        for mol in example_molecules:
+            print(mol['targets'])
+
         example_molecules, _, _ = self.process_raw_graphs(example_molecules, 
             is_training_data=False, bucket_sizes=np.array([29]))
         batch_data = self.make_batch(example_molecules[0])
