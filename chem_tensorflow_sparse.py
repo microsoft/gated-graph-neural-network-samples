@@ -11,6 +11,7 @@ Options:
     --data_dir DIR           Data dir name.
     --restore FILE           File to restore weights from.
     --freeze-graph-model     Freeze weights of graph model components.
+    --evaluate               example evaluation mode using a restored model
 """
 from typing import List, Tuple, Dict, Sequence, Any
 
@@ -20,6 +21,7 @@ import numpy as np
 import tensorflow as tf
 import sys, traceback
 import pdb
+import json
 
 from chem_tensorflow import ChemModel
 from utils import glorot_init, SMALL_NUMBER
@@ -224,7 +226,9 @@ class SparseGGNNChemModel(ChemModel):
         graph_representations = tf.unsorted_segment_sum(data=gated_outputs,
                                                         segment_ids=self.placeholders['graph_nodes_list'],
                                                         num_segments=self.placeholders['num_graphs'])  # [g x 1]
-        return tf.squeeze(graph_representations)  # [g]
+        output = tf.squeeze(graph_representations)  # [g]
+        self.output = output
+        return output
 
     # ----- Data preprocessing and chunking into minibatches:
     def process_raw_graphs(self, raw_data: Sequence[Any], is_training_data: bool) -> Any:
@@ -345,12 +349,40 @@ class SparseGGNNChemModel(ChemModel):
 
             yield batch_feed_dict
 
+    def evaluate_one_batch(self, data):
+        fetch_list = self.output
+        batch_feed_dict = self.make_minibatch_iterator(data, is_training=False)
+        
+        for item in batch_feed_dict:
+            item[self.placeholders['graph_state_keep_prob']] = 1.0
+            item[self.placeholders['edge_weight_dropout_keep_prob']] = 1.0
+            item[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
+            item[self.placeholders['target_values']] = [[]]
+            item[self.placeholders['target_mask']] = [[]]
+            print(self.sess.run(fetch_list, feed_dict=item))
+
+    def example_evaluation(self):
+        ''' Demonstration of what test-time code would look like
+        we query the model with the first n_example_molecules from the validation file
+        '''
+        n_example_molecules = 10
+        with open('molecules_valid.json', 'r') as valid_file:
+            example_molecules = json.load(valid_file)[:n_example_molecules]
+
+        for mol in example_molecules:
+            print(mol['targets'])
+
+        example_molecules = self.process_raw_graphs(example_molecules, is_training_data=False)
+        self.evaluate_one_batch(example_molecules)
 
 def main():
     args = docopt(__doc__)
     try:
         model = SparseGGNNChemModel(args)
-        model.train()
+        if args['--evaluate']:
+            model.example_evaluation()
+        else:
+            model.train()
     except:
         typ, value, tb = sys.exc_info()
         traceback.print_exc()

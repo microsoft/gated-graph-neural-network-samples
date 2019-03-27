@@ -255,6 +255,10 @@ class DenseGGNNChemModel(ChemModel):
         n_example_molecules = 10
         with open('molecules_valid.json', 'r') as valid_file:
             example_molecules = json.load(valid_file)[:n_example_molecules]
+
+        for mol in example_molecules:
+            print(mol['targets'])
+
         example_molecules, _, _ = self.process_raw_graphs(example_molecules, 
             is_training_data=False, bucket_sizes=np.array([29]))
         batch_data = self.make_batch(example_molecules[0])
