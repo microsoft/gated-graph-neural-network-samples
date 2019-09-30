@@ -5,7 +5,9 @@ The inspiration for this application comes from [Gilmer et al. 2017](https://arx
 
 This code was tested in Python 3.5 with TensorFlow 1.3. To run the code `docopt` is also necessary.
 
-This code is maintained by the [Deep Program Understanding](https://www.microsoft.com/en-us/research/project/program/) project at Microsoft Research, Cambridge, UK.
+*Note:* This repository is not maintained anymore. An updated version of the _sparse_ codebase in this repo, together with many more GNN implementations, is available on https://github.com/microsoft/tf-gnn-samples.
+
+This code was maintained by the [Deep Program Understanding](https://www.microsoft.com/en-us/research/project/program/) project at Microsoft Research, Cambridge, UK.
 
 ## Data Extraction
 To download the related data run `get_data.py`. It requires the python package `rdkit` within the Python package
