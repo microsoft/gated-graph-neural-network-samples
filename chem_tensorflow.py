@@ -1,14 +1,14 @@
 #!/usr/bin/env/python
 
-from typing import Tuple, List, Any, Sequence
-
-import tensorflow as tf
-import time
-import os
 import json
-import numpy as np
+import os
 import pickle
 import random
+import time
+from typing import List, Any, Sequence
+
+import numpy as np
+import tensorflow as tf
 
 from utils import MLP, ThreadedIterator, SMALL_NUMBER
 
@@ -47,8 +47,11 @@ class ChemModel(object):
 
         self.run_id = "_".join([time.strftime("%Y-%m-%d-%H-%M-%S"), str(os.getpid())])
         log_dir = args.get('--log_dir') or '.'
+        os.makedirs(log_dir, exist_ok=True)
         self.log_file = os.path.join(log_dir, "%s_log.json" % self.run_id)
         self.best_model_file = os.path.join(log_dir, "%s_model_best.pickle" % self.run_id)
+        tb_log_dir = os.path.join(log_dir, "tb", self.run_id)
+        os.makedirs(tb_log_dir, exist_ok=True)
 
         # Collect parameters:
         params = self.default_params()
@@ -65,7 +68,6 @@ class ChemModel(object):
         print("Run %s starting with following parameters:\n%s" % (self.run_id, json.dumps(self.params)))
         random.seed(params['random_seed'])
         np.random.seed(params['random_seed'])
-
 
         # Load data:
         self.max_num_vertices = 0
@@ -86,13 +88,18 @@ class ChemModel(object):
             self.ops = {}
             self.make_model()
             self.make_train_step()
+            self.make_summaries()
 
             # Restore/initialize variables:
             restore_file = args.get('--restore')
             if restore_file is not None:
-                self.restore_model(restore_file)
+                self.train_step_id, self.valid_step_id = self.restore_progress(restore_file)
             else:
                 self.initialize_model()
+                self.train_step_id = 0
+                self.valid_step_id = 0
+            self.train_writer = tf.summary.FileWriter(os.path.join(tb_log_dir, 'train'), graph=self.graph)
+            self.valid_writer = tf.summary.FileWriter(os.path.join(tb_log_dir, 'validation'), graph=self.graph)
 
     def load_data(self, file_name, is_training_data: bool):
         full_path = os.path.join(self.data_dir, file_name)
@@ -151,8 +158,8 @@ class ChemModel(object):
                 computed_values = self.gated_regression(self.ops['final_node_representations'],
                                                         self.weights['regression_gate_task%i' % task_id],
                                                         self.weights['regression_transform_task%i' % task_id])
-                diff = computed_values - self.placeholders['target_values'][internal_id,:]
-                task_target_mask = self.placeholders['target_mask'][internal_id,:]
+                diff = computed_values - self.placeholders['target_values'][internal_id, :]
+                task_target_mask = self.placeholders['target_mask'][internal_id, :]
                 task_target_num = tf.reduce_sum(task_target_mask) + SMALL_NUMBER
                 diff = diff * task_target_mask  # Mask out unused values
                 self.ops['accuracy_task%i' % task_id] = tf.reduce_sum(tf.abs(diff)) / task_target_num
@@ -185,6 +192,13 @@ class ChemModel(object):
         # Initialize newly-introduced variables:
         self.sess.run(tf.local_variables_initializer())
 
+    def make_summaries(self):
+        with tf.name_scope('summary'):
+            tf.summary.scalar('loss', self.ops['loss'])
+            for task_id in self.params['task_ids']:
+                tf.summary.scalar('accuracy%i' % task_id, self.ops['accuracy_task%i' % task_id])
+        self.ops['summary'] = tf.summary.merge_all()
+
     def gated_regression(self, last_h, regression_gate, regression_transform):
         raise Exception("Models have to implement gated_regression!")
 
@@ -197,7 +211,7 @@ class ChemModel(object):
     def make_minibatch_iterator(self, data: Any, is_training: bool):
         raise Exception("Models have to implement make_minibatch_iterator!")
 
-    def run_epoch(self, epoch_name: str, data, is_training: bool):
+    def run_epoch(self, epoch_name: str, data, is_training: bool, start_step: int = 0):
         chemical_accuracies = np.array([0.066513725, 0.012235489, 0.071939046, 0.033730778, 0.033486113, 0.004278493,
                                         0.001330901, 0.004165489, 0.004128926, 0.00409976, 0.004527465, 0.012292586,
                                         0.037467458])
@@ -207,18 +221,21 @@ class ChemModel(object):
         accuracy_ops = [self.ops['accuracy_task%i' % task_id] for task_id in self.params['task_ids']]
         start_time = time.time()
         processed_graphs = 0
+        steps = 0
         batch_iterator = ThreadedIterator(self.make_minibatch_iterator(data, is_training), max_queue_size=5)
         for step, batch_data in enumerate(batch_iterator):
             num_graphs = batch_data[self.placeholders['num_graphs']]
             processed_graphs += num_graphs
             if is_training:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = self.params['out_layer_dropout_keep_prob']
-                fetch_list = [self.ops['loss'], accuracy_ops, self.ops['train_step']]
+                fetch_list = [self.ops['loss'], accuracy_ops, self.ops['summary'], self.ops['train_step']]
             else:
                 batch_data[self.placeholders['out_layer_dropout_keep_prob']] = 1.0
-                fetch_list = [self.ops['loss'], accuracy_ops]
+                fetch_list = [self.ops['loss'], accuracy_ops, self.ops['summary']]
             result = self.sess.run(fetch_list, feed_dict=batch_data)
-            (batch_loss, batch_accuracies) = (result[0], result[1])
+            (batch_loss, batch_accuracies, batch_summary) = (result[0], result[1], result[2])
+            writer = self.train_writer if is_training else self.valid_writer
+            writer.add_summary(batch_summary, start_step + step)
             loss += batch_loss * num_graphs
             accuracies.append(np.array(batch_accuracies) * num_graphs)
 
@@ -227,19 +244,20 @@ class ChemModel(object):
                                                                                num_graphs,
                                                                                loss / processed_graphs),
                   end='\r')
+            steps += 1
 
         accuracies = np.sum(accuracies, axis=0) / processed_graphs
         loss = loss / processed_graphs
         error_ratios = accuracies / chemical_accuracies[self.params["task_ids"]]
         instance_per_sec = processed_graphs / (time.time() - start_time)
-        return loss, accuracies, error_ratios, instance_per_sec
+        return loss, accuracies, error_ratios, instance_per_sec, steps
 
     def train(self):
         log_to_save = []
         total_time_start = time.time()
         with self.graph.as_default():
             if self.args.get('--restore') is not None:
-                _, valid_accs, _, _ = self.run_epoch("Resumed (validation)", self.valid_data, False)
+                _, valid_accs, _, _, steps = self.run_epoch("Resumed (validation)", self.valid_data, False)
                 best_val_acc = np.sum(valid_accs)
                 best_val_acc_epoch = 0
                 print("\r\x1b[KResumed operation, initial cum. val. acc: %.5f" % best_val_acc)
@@ -247,16 +265,18 @@ class ChemModel(object):
                 (best_val_acc, best_val_acc_epoch) = (float("+inf"), 0)
             for epoch in range(1, self.params['num_epochs'] + 1):
                 print("== Epoch %i" % epoch)
-                train_loss, train_accs, train_errs, train_speed = self.run_epoch("epoch %i (training)" % epoch,
-                                                                                 self.train_data, True)
+                train_loss, train_accs, train_errs, train_speed, train_steps = self.run_epoch("epoch %i (training)" % epoch,
+                                                                                              self.train_data, True, self.train_step_id)
+                self.train_step_id += train_steps
                 accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], train_accs)])
                 errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], train_errs)])
                 print("\r\x1b[K Train: loss: %.5f | acc: %s | error_ratio: %s | instances/sec: %.2f" % (train_loss,
                                                                                                         accs_str,
                                                                                                         errs_str,
                                                                                                         train_speed))
-                valid_loss, valid_accs, valid_errs, valid_speed = self.run_epoch("epoch %i (validation)" % epoch,
-                                                                                 self.valid_data, False)
+                valid_loss, valid_accs, valid_errs, valid_speed, valid_steps = self.run_epoch("epoch %i (validation)" % epoch,
+                                                                                              self.valid_data, False, self.valid_step_id)
+                self.valid_step_id += valid_steps
                 accs_str = " ".join(["%i:%.5f" % (id, acc) for (id, acc) in zip(self.params['task_ids'], valid_accs)])
                 errs_str = " ".join(["%i:%.5f" % (id, err) for (id, err) in zip(self.params['task_ids'], valid_errs)])
                 print("\r\x1b[K Valid: loss: %.5f | acc: %s | error_ratio: %s | instances/sec: %.2f" % (valid_loss,
@@ -277,26 +297,29 @@ class ChemModel(object):
 
                 val_acc = np.sum(valid_accs)  # type: float
                 if val_acc < best_val_acc:
-                    self.save_model(self.best_model_file)
-                    print("  (Best epoch so far, cum. val. acc decreased to %.5f from %.5f. Saving to '%s')" % (val_acc, best_val_acc, self.best_model_file))
+                    self.save_progress(self.best_model_file, self.train_step_id, self.valid_step_id)
+                    print("  (Best epoch so far, cum. val. acc decreased to %.5f from %.5f. Saving to '%s')" % (
+                        val_acc, best_val_acc, self.best_model_file))
                     best_val_acc = val_acc
                     best_val_acc_epoch = epoch
                 elif epoch - best_val_acc_epoch >= self.params['patience']:
                     print("Stopping training after %i epochs without improvement on validation accuracy." % self.params['patience'])
                     break
 
-    def save_model(self, path: str) -> None:
+    def save_progress(self, model_path: str, train_step: int, valid_step: int) -> None:
         weights_to_save = {}
         for variable in self.sess.graph.get_collection(tf.GraphKeys.GLOBAL_VARIABLES):
             assert variable.name not in weights_to_save
             weights_to_save[variable.name] = self.sess.run(variable)
 
         data_to_save = {
-                         "params": self.params,
-                         "weights": weights_to_save
-                       }
+            "params": self.params,
+            "weights": weights_to_save,
+            "train_step": train_step,
+            "valid_step": valid_step,
+        }
 
-        with open(path, 'wb') as out_file:
+        with open(model_path, 'wb') as out_file:
             pickle.dump(data_to_save, out_file, pickle.HIGHEST_PROTOCOL)
 
     def initialize_model(self) -> None:
@@ -304,9 +327,9 @@ class ChemModel(object):
                            tf.local_variables_initializer())
         self.sess.run(init_op)
 
-    def restore_model(self, path: str) -> None:
-        print("Restoring weights from file %s." % path)
-        with open(path, 'rb') as in_file:
+    def restore_progress(self, model_path: str) -> (int, int):
+        print("Restoring weights from file %s." % model_path)
+        with open(model_path, 'rb') as in_file:
             data_to_load = pickle.load(in_file)
 
         # Assert that we got the same model configuration
@@ -332,3 +355,5 @@ class ChemModel(object):
                     print('Saved weights for %s not used by model.' % var_name)
             restore_ops.append(tf.variables_initializer(variables_to_initialize))
             self.sess.run(restore_ops)
+
+        return data_to_load['train_step'], data_to_load['valid_step']
