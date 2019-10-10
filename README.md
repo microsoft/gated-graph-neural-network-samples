@@ -1,11 +1,12 @@
 # Gated Graph Neural Networks
+
+> ## This repository is not maintained anymore. An updated version of the _sparse_ codebase in this repo, together with many more GNN implementations, is available on https://github.com/microsoft/tf-gnn-samples.
+
 This repository contains two implementations of the Gated Graph Neural Networks
 of [Li et al. 2015](https://arxiv.org/abs/1511.05493) for learning properties of chemical molecules.
 The inspiration for this application comes from [Gilmer et al. 2017](https://arxiv.org/abs/1704.01212).
 
 This code was tested in Python 3.5 with TensorFlow 1.3. To run the code `docopt` is also necessary.
-
-*Note:* This repository is not maintained anymore. An updated version of the _sparse_ codebase in this repo, together with many more GNN implementations, is available on https://github.com/microsoft/tf-gnn-samples.
 
 This code was maintained by the [Deep Program Understanding](https://www.microsoft.com/en-us/research/project/program/) project at Microsoft Research, Cambridge, UK.
 
